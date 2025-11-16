@@ -1,0 +1,40 @@
+name: PR Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  rust-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Install cargo-machete
+        uses: baptiste0928/cargo-install@v2
+        with:
+          crate: cargo-machete
+
+      - name: Run cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Run cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run cargo check
+        run: cargo check --all-targets
+
+      - name: Run cargo machete
+        run: cargo machete
