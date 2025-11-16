@@ -28,6 +28,26 @@
      GitHub Actions количества найденных, отправленных и пропущенных (как
      дубликаты) фильмов.
 
+### Визуализация архитектуры
+
+```mermaid
+flowchart TD
+    subgraph GA[Workflow GitHub Actions «daily-sync»]
+        direction TB
+        RH[restore_history\nскачивание state/sent_movie_ids.txt] --> FU[fetch_updates\nTMDB API]
+        FU --> PP[prepare_payloads\nгруппировка релизов]
+        PP --> DN[dispatch_notifications\nTelegram Bot API]
+        DN --> SR[summarize_run\nитоговый отчёт]
+        DN --> PH[persist_history\nпубликация артефакта]
+        PH --> RH
+    end
+
+    FU -.->|HTTP| TMDB[(TMDB API)]
+    DN --> TG[Telegram чаты Dev/Prod]
+    DN -. при ошибке .-> NF[notify_failure\nDev-чат]
+    PH --> Artifact[Артефакт state/sent_movie_ids.txt]
+```
+
 ## Использование TMDB API
 - **Базовый эндпоинт:** `https://api.themoviedb.org/3/discover/movie` с
   параметрами `sort_by=primary_release_date.asc`, `with_release_type=4` (только
