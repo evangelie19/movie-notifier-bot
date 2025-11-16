@@ -1,0 +1,60 @@
+name: Update Rust Toolchain
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Update rust-toolchain.toml
+        id: update_toolchain
+        run: |
+          set -euo pipefail
+          latest_version=$(rustup run stable rustc --version | awk '{print $2}')
+          temp_file=$(mktemp)
+          cat <<EOT > "$temp_file"
+[toolchain]
+channel = "${latest_version}"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+EOT
+          if [ ! -f rust-toolchain.toml ] || ! cmp -s "$temp_file" rust-toolchain.toml; then
+            mv "$temp_file" rust-toolchain.toml
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            rm "$temp_file"
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "latest_version=${latest_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        if: steps.update_toolchain.outputs.updated == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update Rust toolchain"
+          branch: ci/update-rust-toolchain
+          title: "chore: update Rust toolchain"
+          body: |
+            ## Summary
+            - Update rust-toolchain.toml to version ${{ steps.update_toolchain.outputs.latest_version }}
+
+            ## Testing
+            - No tests were run as part of this automation.
+          add-paths: rust-toolchain.toml
