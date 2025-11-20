@@ -1,3 +1,4 @@
+mod tmdb;
 mod github;
 mod state;
 
