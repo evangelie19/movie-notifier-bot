@@ -15,6 +15,9 @@ use tokio::time::sleep;
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
 const SORTING: &str = "primary_release_date.asc";
+const RELEVANT_PRODUCTION_COUNTRIES: [&str; 10] =
+    ["US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR"];
+const EXCLUDED_GENRES: [&str; 4] = ["Documentary", "TV Movie", "Music", "Reality"];
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(5 * 60),
     Duration::from_secs(15 * 60),
@@ -140,6 +143,10 @@ impl TmdbClient {
             let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
             let details = self.fetch_movie_details(movie.id).await?;
 
+            if !is_relevant_release(&details) {
+                continue;
+            }
+
             releases.push(MovieRelease {
                 id: movie.id,
                 title: movie.title,
@@ -171,6 +178,11 @@ impl TmdbClient {
         Ok(MovieDetails {
             homepage: payload.homepage,
             watch_providers,
+            production_countries: payload.production_countries,
+            vote_average: payload.vote_average,
+            vote_count: payload.vote_count,
+            genres: payload.genres,
+            runtime: payload.runtime,
         })
     }
 
@@ -249,6 +261,16 @@ struct MovieDetailsResponse {
     homepage: Option<String>,
     #[serde(rename = "watch/providers")]
     watch_providers: Option<WatchProvidersEnvelope>,
+    #[serde(default)]
+    production_countries: Vec<ProductionCountry>,
+    #[serde(default)]
+    vote_average: f64,
+    #[serde(default)]
+    vote_count: u32,
+    #[serde(default)]
+    genres: Vec<Genre>,
+    #[serde(default)]
+    runtime: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +298,22 @@ struct WatchProviderInfo {
 pub struct MovieDetails {
     homepage: Option<String>,
     watch_providers: Vec<String>,
+    production_countries: Vec<ProductionCountry>,
+    vote_average: f64,
+    vote_count: u32,
+    genres: Vec<Genre>,
+    runtime: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProductionCountry {
+    #[serde(rename = "iso_3166_1")]
+    code: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Genre {
+    name: String,
 }
 
 fn discover_request(
@@ -328,4 +366,117 @@ fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<Strin
     }
 
     providers.into_iter().collect()
+}
+
+pub fn is_relevant_release(details: &MovieDetails) -> bool {
+    let has_relevant_country = details
+        .production_countries
+        .iter()
+        .any(|country| RELEVANT_PRODUCTION_COUNTRIES.contains(&country.code.as_str()));
+
+    let has_sufficient_rating = details.vote_count >= 20 && details.vote_average >= 4.0;
+
+    let has_excluded_genre = details
+        .genres
+        .iter()
+        .any(|genre| EXCLUDED_GENRES.contains(&genre.name.as_str()));
+
+    let has_required_runtime = details
+        .runtime
+        .map(|minutes| minutes >= 60)
+        .unwrap_or(false);
+
+    has_relevant_country && has_sufficient_rating && !has_excluded_genre && has_required_runtime
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_details<F>(mut transform: F) -> MovieDetails
+    where
+        F: FnMut(&mut MovieDetails),
+    {
+        let mut details = MovieDetails {
+            homepage: None,
+            watch_providers: Vec::new(),
+            production_countries: vec![ProductionCountry {
+                code: "US".to_string(),
+            }],
+            vote_average: 6.5,
+            vote_count: 50,
+            genres: vec![Genre {
+                name: "Drama".to_string(),
+            }],
+            runtime: Some(95),
+        };
+
+        transform(&mut details);
+        details
+    }
+
+    #[test]
+    fn relevant_release_passes_all_checks() {
+        let details = make_details(|_| {});
+
+        assert!(is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_without_relevant_country_is_filtered_out() {
+        let details = make_details(|details| {
+            details.production_countries = vec![ProductionCountry {
+                code: "BR".to_string(),
+            }];
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_low_rating_is_filtered_out() {
+        let details = make_details(|details| {
+            details.vote_average = 3.5;
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_insufficient_votes_is_filtered_out() {
+        let details = make_details(|details| {
+            details.vote_count = 10;
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_excluded_genre_is_filtered_out() {
+        let details = make_details(|details| {
+            details.genres.push(Genre {
+                name: "Documentary".to_string(),
+            });
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_short_runtime_is_filtered_out() {
+        let details = make_details(|details| {
+            details.runtime = Some(55);
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_without_runtime_is_filtered_out() {
+        let details = make_details(|details| {
+            details.runtime = None;
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
 }
