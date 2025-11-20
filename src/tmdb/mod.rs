@@ -1,0 +1,311 @@
+#![allow(dead_code)]
+// Модуль ещё не встроен в рабочий поток бота, поэтому временно подавляем
+// предупреждения о неиспользуемых элементах до его подключения.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::time::Duration;
+
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use reqwest::{Client, RequestBuilder, Response, StatusCode};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use thiserror::Error;
+use tokio::time::sleep;
+
+const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
+const DIGITAL_RELEASE_TYPE: &str = "4";
+const SORTING: &str = "primary_release_date.asc";
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(30 * 60),
+];
+
+#[derive(Debug, Error)]
+pub enum TmdbError {
+    #[error("некорректное окно релизов: начало позже конца")]
+    InvalidWindow,
+    #[error("ошибка HTTP: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("неожиданный статус ответа: {0}")]
+    UnexpectedStatus(StatusCode),
+    #[error("ошибка парсинга даты: {0}")]
+    DateParse(#[from] chrono::ParseError),
+    #[error("предел повторных попыток исчерпан")]
+    RetryLimitExceeded,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReleaseWindow {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MovieRelease {
+    pub id: u64,
+    pub title: String,
+    pub release_date: NaiveDate,
+    pub original_language: String,
+    pub popularity: f64,
+    pub homepage: Option<String>,
+    pub watch_providers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TmdbClient {
+    http: Client,
+    api_key: String,
+    history: HashSet<u64>,
+}
+
+impl TmdbClient {
+    pub fn new<S, I>(api_key: S, history: I) -> Self
+    where
+        S: Into<String>,
+        I: IntoIterator<Item = u64>,
+    {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("не удалось создать HTTP-клиент");
+
+        Self {
+            http,
+            api_key: api_key.into(),
+            history: history.into_iter().collect(),
+        }
+    }
+
+    pub fn append_history<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        self.history.extend(ids);
+    }
+
+    pub async fn fetch_digital_releases(
+        &self,
+        window: ReleaseWindow,
+    ) -> Result<Vec<MovieRelease>, TmdbError> {
+        if window.start > window.end {
+            return Err(TmdbError::InvalidWindow);
+        }
+
+        let url = format!("{TMDB_BASE_URL}/discover/movie");
+        let client = self.http.clone();
+        let api_key = self.api_key.clone();
+        let start = window.start.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let end = window.end.to_rfc3339_opts(SecondsFormat::Secs, true);
+
+        let request_factory = move || {
+            discover_request(
+                client.clone(),
+                url.clone(),
+                api_key.clone(),
+                start.clone(),
+                end.clone(),
+            )
+        };
+
+        let response: DiscoverResponse = self.fetch_json(request_factory).await?;
+
+        let mut releases = Vec::new();
+        for movie in response.results.into_iter() {
+            if self.history.contains(&movie.id) {
+                continue;
+            }
+
+            if movie.release_date.is_empty() {
+                continue;
+            }
+
+            let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
+            let details = self.fetch_movie_details(movie.id).await?;
+
+            releases.push(MovieRelease {
+                id: movie.id,
+                title: movie.title,
+                release_date,
+                original_language: movie.original_language,
+                popularity: movie.popularity,
+                homepage: details.homepage,
+                watch_providers: details.watch_providers,
+            });
+        }
+
+        Ok(releases)
+    }
+
+    pub async fn fetch_movie_details(&self, movie_id: u64) -> Result<MovieDetails, TmdbError> {
+        let url = format!("{TMDB_BASE_URL}/movie/{movie_id}");
+        let client = self.http.clone();
+        let api_key = self.api_key.clone();
+
+        let request_factory = move || movie_request(client.clone(), url.clone(), api_key.clone());
+
+        let payload: MovieDetailsResponse = self.fetch_json(request_factory).await?;
+
+        let watch_providers = payload
+            .watch_providers
+            .map(|providers| collect_providers(providers.results))
+            .unwrap_or_default();
+
+        Ok(MovieDetails {
+            homepage: payload.homepage,
+            watch_providers,
+        })
+    }
+
+    async fn fetch_json<T, F>(&self, request_factory: F) -> Result<T, TmdbError>
+    where
+        T: DeserializeOwned,
+        F: Fn() -> RequestBuilder,
+    {
+        let response = self.execute_with_retry(request_factory).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(TmdbError::UnexpectedStatus(status));
+        }
+
+        Ok(response.json().await?)
+    }
+
+    async fn execute_with_retry<F>(&self, request_factory: F) -> Result<Response, TmdbError>
+    where
+        F: Fn() -> RequestBuilder,
+    {
+        let mut delays = RETRY_DELAYS.iter().copied();
+
+        loop {
+            match request_factory().send().await {
+                Ok(resp) if resp.status().is_server_error() => {
+                    if let Some(delay) = delays.next() {
+                        sleep(delay).await;
+                        continue;
+                    }
+
+                    break;
+                }
+                Ok(resp) => return Ok(resp),
+                Err(err)
+                    if err
+                        .status()
+                        .map(|status| status.is_server_error())
+                        .unwrap_or(false) =>
+                {
+                    if let Some(delay) = delays.next() {
+                        sleep(delay).await;
+                        continue;
+                    }
+
+                    break;
+                }
+                Err(err) => return Err(TmdbError::Http(err)),
+            }
+        }
+
+        Err(TmdbError::RetryLimitExceeded)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverResponse {
+    results: Vec<DiscoverMovie>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverMovie {
+    id: u64,
+    title: String,
+    #[serde(default)]
+    release_date: String,
+    #[serde(default)]
+    original_language: String,
+    #[serde(default)]
+    popularity: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MovieDetailsResponse {
+    homepage: Option<String>,
+    #[serde(rename = "watch/providers")]
+    watch_providers: Option<WatchProvidersEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchProvidersEnvelope {
+    results: HashMap<String, WatchProviderRegion>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchProviderRegion {
+    #[serde(default)]
+    flatrate: Vec<WatchProviderInfo>,
+    #[serde(default)]
+    rent: Vec<WatchProviderInfo>,
+    #[serde(default)]
+    buy: Vec<WatchProviderInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchProviderInfo {
+    #[serde(rename = "provider_name")]
+    provider_name: String,
+}
+
+#[derive(Debug)]
+pub struct MovieDetails {
+    homepage: Option<String>,
+    watch_providers: Vec<String>,
+}
+
+fn discover_request(
+    client: Client,
+    url: String,
+    api_key: String,
+    start: String,
+    end: String,
+) -> RequestBuilder {
+    let query = vec![
+        ("api_key".to_string(), api_key),
+        ("sort_by".to_string(), SORTING.to_string()),
+        (
+            "with_release_type".to_string(),
+            DIGITAL_RELEASE_TYPE.to_string(),
+        ),
+        ("primary_release_date.gte".to_string(), start),
+        ("primary_release_date.lte".to_string(), end),
+        ("include_adult".to_string(), "false".to_string()),
+    ];
+
+    client.get(url).query(&query)
+}
+
+fn movie_request(client: Client, url: String, api_key: String) -> RequestBuilder {
+    let query = vec![
+        ("api_key".to_string(), api_key),
+        (
+            "append_to_response".to_string(),
+            "watch/providers".to_string(),
+        ),
+    ];
+
+    client.get(url).query(&query)
+}
+
+fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<String> {
+    let mut providers = BTreeSet::new();
+    for region in regions.into_values() {
+        for info in region
+            .flatrate
+            .into_iter()
+            .chain(region.rent)
+            .chain(region.buy)
+        {
+            providers.insert(info.provider_name);
+        }
+    }
+
+    providers.into_iter().collect()
+}
