@@ -41,6 +41,11 @@
   release_date, original_language, popularity, id }`. Для каждого `id` при
   необходимости выполняется второй запрос `GET /3/movie/{id}` для получения
   `homepage` и `watch/providers`.
+- **Пагинация Discover API:** выдача ограничена 20 элементами на страницу;
+  ответ содержит `total_pages`. Клиент должен последовательно выполнять запросы
+  для страниц `1..=total_pages` (с теми же фильтрами окна и `with_release_type`)
+  и объединять все элементы, иначе часть релизов выпадет из выборки и бот не
+  сможет их отправить.
 - **DTO клиента:** модуль `tmdb` определяет `ReleaseWindow` (границы интервала в
   `DateTime<Utc>`), `MovieRelease` (агрегированные поля `id`, `title`,
   `release_date`, `original_language`, `popularity`, `homepage`,

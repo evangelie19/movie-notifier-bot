@@ -98,20 +98,37 @@ impl TmdbClient {
         let start = window.start.to_rfc3339_opts(SecondsFormat::Secs, true);
         let end = window.end.to_rfc3339_opts(SecondsFormat::Secs, true);
 
-        let request_factory = move || {
-            discover_request(
-                client.clone(),
-                url.clone(),
-                api_key.clone(),
-                start.clone(),
-                end.clone(),
-            )
+        let request_factory = |page| {
+            let client = client.clone();
+            let url = url.clone();
+            let api_key = api_key.clone();
+            let start = start.clone();
+            let end = end.clone();
+
+            move || {
+                discover_request(
+                    client.clone(),
+                    url.clone(),
+                    api_key.clone(),
+                    start.clone(),
+                    end.clone(),
+                    page,
+                )
+            }
         };
 
-        let response: DiscoverResponse = self.fetch_json(request_factory).await?;
+        let mut response: DiscoverResponse = self.fetch_json(request_factory(1)).await?;
+        let mut movies = response.results;
+
+        if response.total_pages > 1 {
+            for page in 2..=response.total_pages {
+                response = self.fetch_json(request_factory(page)).await?;
+                movies.extend(response.results);
+            }
+        }
 
         let mut releases = Vec::new();
-        for movie in response.results.into_iter() {
+        for movie in movies.into_iter() {
             if self.history.contains(&movie.id) {
                 continue;
             }
@@ -211,6 +228,7 @@ impl TmdbClient {
 
 #[derive(Debug, Deserialize)]
 struct DiscoverResponse {
+    total_pages: u32,
     results: Vec<DiscoverMovie>,
 }
 
@@ -266,6 +284,7 @@ fn discover_request(
     api_key: String,
     start: String,
     end: String,
+    page: u32,
 ) -> RequestBuilder {
     let query = vec![
         ("api_key".to_string(), api_key),
@@ -277,6 +296,7 @@ fn discover_request(
         ("primary_release_date.gte".to_string(), start),
         ("primary_release_date.lte".to_string(), end),
         ("include_adult".to_string(), "false".to_string()),
+        ("page".to_string(), page.to_string()),
     ];
 
     client.get(url).query(&query)
