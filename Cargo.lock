@@ -5,3 +5,17 @@ version = 4
 [[package]]
 name = "movie-notifier-bot"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "tokio"
+version = "0.0.0"
+dependencies = [
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "0.0.0"

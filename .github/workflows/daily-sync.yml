@@ -1,0 +1,50 @@
+name: Daily Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * *'
+
+jobs:
+  fetch_digital_releases:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Установка Rust 2024
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Сборка и запуск бота
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TELEGRAM_BOT_TOKEN_DEV: ${{ secrets.TELEGRAM_BOT_TOKEN_DEV }}
+          TELEGRAM_BOT_TOKEN_PROD: ${{ secrets.TELEGRAM_BOT_TOKEN_PROD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p state
+          touch state/sent_movie_ids.txt
+          cargo run --release
+
+      - name: Публикация истории отправок
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state/sent_movie_ids.txt
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: summarize_run
+        if: always()
+        run: |
+          echo "## Итоги суточного запуска" >> "$GITHUB_STEP_SUMMARY"
+          echo "* Статус job: ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "* Время завершения: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+          echo "* Версия Rust: $(rustc --version)" >> "$GITHUB_STEP_SUMMARY"
