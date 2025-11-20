@@ -2,9 +2,9 @@ mod config;
 mod formatter;
 
 use std::time::SystemTime;
-mod tmdb;
 mod github;
 mod state;
+mod tmdb;
 
 fn main() {
     let config = config::TelegramConfig::default();
