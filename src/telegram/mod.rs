@@ -107,6 +107,7 @@ impl TelegramDispatcher {
     }
 }
 
+#[allow(dead_code)]
 pub struct TelegramDispatcherBuilder {
     token: String,
     chat_ids: Vec<i64>,
@@ -116,6 +117,7 @@ pub struct TelegramDispatcherBuilder {
     max_retries: usize,
 }
 
+#[allow(dead_code)]
 impl TelegramDispatcherBuilder {
     fn new(token: String, chat_ids: Vec<i64>) -> Self {
         Self {
@@ -179,6 +181,7 @@ pub enum TelegramError {
     Api { status: StatusCode, body: String },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("неизвестное значение окружения BOT_ENV: {0}")]
@@ -187,6 +190,7 @@ pub enum ConfigError {
     MissingToken { var: String },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotEnvironment {
     Dev,
@@ -211,6 +215,7 @@ impl BotEnvironment {
     }
 }
 
+#[allow(dead_code)]
 pub fn dispatcher_from_env(chat_ids: Vec<i64>) -> Result<TelegramDispatcher, ConfigError> {
     let environment = BotEnvironment::from_env()?;
     let token_var = environment.token_var();
