@@ -69,6 +69,11 @@ impl<C: ArtifactStore> SentHistory<C> {
         inserted
     }
 
+    /// Возвращает итератор по всем известным идентификаторам в отсортированном порядке.
+    pub fn iter(&self) -> impl Iterator<Item = &MovieId> {
+        self.ids.iter()
+    }
+
     /// Восстанавливает историю: пытается скачать артефакт и обновить локальный файл.
     pub fn restore(&mut self) -> Result<(), StateError> {
         if let Some(artifact_bytes) = self.artifact_store.download_artifact(&self.artifact_name)? {
