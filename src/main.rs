@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod config;
 mod formatter;
 
@@ -8,6 +10,7 @@ use thiserror::Error;
 
 mod github;
 mod state;
+mod telegram;
 mod tmdb;
 
 use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
