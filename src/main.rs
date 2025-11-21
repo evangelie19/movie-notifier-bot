@@ -2,343 +2,179 @@
 
 mod config;
 mod formatter;
+
+use std::env;
+
+use chrono::{DateTime, Duration, Utc};
+use thiserror::Error;
+
 mod github;
 mod state;
 mod telegram;
 mod tmdb;
 
-use std::{future::Future, pin::Pin, time::SystemTime};
+use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
+use crate::state::SentHistory;
+use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
-use formatter::{DigitalRelease, TelegramMessage, build_messages};
-use state::{MovieId, SentHistory, StateError};
-use telegram::TelegramDispatcher;
-use thiserror::Error;
+const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
+const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
 
 #[derive(Debug, Error)]
-pub enum PipelineError {
-    #[error("ошибка состояния: {0}")]
-    State(#[from] StateError),
-    #[error("ошибка Telegram: {0}")]
-    Telegram(#[from] telegram::TelegramError),
-    #[error("ошибка источника данных: {0}")]
-    Source(String),
-}
-
-pub trait HistoryAccess {
-    fn restore(&mut self) -> Result<(), PipelineError>;
-    fn append(&mut self, ids: &[MovieId]) -> usize;
-    fn persist(&mut self) -> Result<(), PipelineError>;
-    fn contains(&self, id: MovieId) -> bool;
-}
-
-impl HistoryAccess for SentHistory {
-    fn restore(&mut self) -> Result<(), PipelineError> {
-        SentHistory::restore(self).map_err(PipelineError::from)
-    }
-
-    fn append(&mut self, ids: &[MovieId]) -> usize {
-        SentHistory::append(self, ids)
-    }
-
-    fn persist(&mut self) -> Result<(), PipelineError> {
-        SentHistory::persist(self).map_err(PipelineError::from)
-    }
-
-    fn contains(&self, id: MovieId) -> bool {
-        SentHistory::contains(self, id)
-    }
-}
-
-pub trait ReleaseFetcher {
-    fn fetch<'a>(
-        &'a self,
-        history: &'a dyn HistoryAccess,
-        now: SystemTime,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<PipelineRelease>, PipelineError>> + Send + 'a>>;
-}
-
-pub trait MessageDispatcher {
-    fn send_messages<'a>(
-        &'a self,
-        messages: &'a [TelegramMessage],
-    ) -> Pin<Box<dyn Future<Output = Result<(), PipelineError>> + Send + 'a>>;
-}
-
-impl MessageDispatcher for TelegramDispatcher {
-    fn send_messages<'a>(
-        &'a self,
-        messages: &'a [TelegramMessage],
-    ) -> Pin<Box<dyn Future<Output = Result<(), PipelineError>> + Send + 'a>> {
-        Box::pin(async move {
-            for message in messages {
-                self.send_batch(message.chat_id, [message.text.clone()])
-                    .await?;
-            }
-            Ok(())
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PipelineRelease {
-    pub id: MovieId,
-    pub release: DigitalRelease,
+enum AppError {
+    #[error("не задана переменная окружения {0}")]
+    MissingEnv(String),
+    #[error("некорректное значение GITHUB_REPOSITORY: {0}")]
+    InvalidRepositoryFormat(String),
+    #[error(transparent)]
+    State(#[from] state::StateError),
+    #[error(transparent)]
+    Tmdb(#[from] tmdb::TmdbError),
 }
 
 #[tokio::main]
-async fn main() -> Result<(), PipelineError> {
-    // Основной сценарий предполагает создание реальных зависимостей через окружение.
-    // Для локального запуска оставляем заглушки, чтобы подчеркнуть порядок пайплайна.
-    let mut history = EmptyHistory;
-    let fetcher = NoopFetcher;
-    let dispatcher = NoopDispatcher;
-    let config = config::TelegramConfig::default();
-    let now = SystemTime::now();
+async fn main() -> Result<(), AppError> {
+    let mut history = restore_history()?;
+    let tmdb_api_key = required_env("TMDB_API_KEY")?;
+    let tmdb_client = TmdbClient::new(tmdb_api_key, history.iter().copied());
 
-    run_pipeline(&mut history, &fetcher, &dispatcher, &config, now).await
-}
+    let now = Utc::now();
+    let window = release_window(now);
+    let releases = tmdb_client.fetch_digital_releases(window).await?;
 
-pub async fn run_pipeline(
-    history: &mut dyn HistoryAccess,
-    fetcher: &dyn ReleaseFetcher,
-    dispatcher: &dyn MessageDispatcher,
-    config: &config::TelegramConfig,
-    now: SystemTime,
-) -> Result<(), PipelineError> {
-    restore_history(history)?;
-    let releases = fetch_updates(fetcher, history, now).await?;
-    let messages = prepare_payloads(&releases, config, now);
-
-    if messages.is_empty() {
-        return Ok(());
-    }
-
-    dispatch_notifications(dispatcher, &messages).await?;
-    persist_history(history, &releases)?;
+    persist_history(&mut history, &releases)?;
 
     Ok(())
 }
 
-fn restore_history(history: &mut dyn HistoryAccess) -> Result<(), PipelineError> {
-    history.restore()
+fn release_window(now: DateTime<Utc>) -> ReleaseWindow {
+    let start = now - Duration::hours(24) - Duration::minutes(5);
+    ReleaseWindow { start, end: now }
 }
 
-async fn fetch_updates(
-    fetcher: &dyn ReleaseFetcher,
-    history: &dyn HistoryAccess,
-    now: SystemTime,
-) -> Result<Vec<PipelineRelease>, PipelineError> {
-    fetcher.fetch(history, now).await
-}
+fn persist_history<C: ArtifactStore>(
+    history: &mut SentHistory<C>,
+    releases: &[MovieRelease],
+) -> Result<usize, AppError> {
+    if releases.is_empty() {
+        return Ok(0);
+    }
 
-fn prepare_payloads(
-    releases: &[PipelineRelease],
-    config: &config::TelegramConfig,
-    now: SystemTime,
-) -> Vec<TelegramMessage> {
-    let digital: Vec<DigitalRelease> = releases.iter().map(|item| item.release.clone()).collect();
-    build_messages(&digital, config, now)
-}
-
-async fn dispatch_notifications(
-    dispatcher: &dyn MessageDispatcher,
-    messages: &[TelegramMessage],
-) -> Result<(), PipelineError> {
-    dispatcher.send_messages(messages).await
-}
-
-fn persist_history(
-    history: &mut dyn HistoryAccess,
-    releases: &[PipelineRelease],
-) -> Result<(), PipelineError> {
-    let new_ids: Vec<MovieId> = releases.iter().map(|item| item.id).collect();
-    history.append(&new_ids);
+    let ids: Vec<u64> = releases.iter().map(|release| release.id).collect();
+    let inserted = history.append(&ids);
     history.persist()?;
-    Ok(())
+    Ok(inserted)
 }
 
-#[derive(Default)]
-struct EmptyHistory;
-
-impl HistoryAccess for EmptyHistory {
-    fn restore(&mut self) -> Result<(), PipelineError> {
-        Ok(())
-    }
-
-    fn append(&mut self, _ids: &[MovieId]) -> usize {
-        0
-    }
-
-    fn persist(&mut self) -> Result<(), PipelineError> {
-        Ok(())
-    }
-
-    fn contains(&self, _id: MovieId) -> bool {
-        false
-    }
+fn restore_history() -> Result<SentHistory<GitHubArtifactsClient>, AppError> {
+    let creds = github_credentials_from_env()?;
+    let mut history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
+    history.restore()?;
+    Ok(history)
 }
 
-struct NoopFetcher;
+fn github_credentials_from_env() -> Result<GitHubCredentials, AppError> {
+    let repo = required_env("GITHUB_REPOSITORY")?;
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| AppError::InvalidRepositoryFormat(repo.clone()))?;
+    let token = required_env("GITHUB_TOKEN")?;
 
-impl ReleaseFetcher for NoopFetcher {
-    fn fetch<'a>(
-        &'a self,
-        _history: &'a dyn HistoryAccess,
-        _now: SystemTime,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<PipelineRelease>, PipelineError>> + Send + 'a>>
-    {
-        Box::pin(async { Ok(Vec::new()) })
-    }
+    Ok(GitHubCredentials::new(owner, name, token))
 }
 
-struct NoopDispatcher;
-
-impl MessageDispatcher for NoopDispatcher {
-    fn send_messages<'a>(
-        &'a self,
-        _messages: &'a [TelegramMessage],
-    ) -> Pin<Box<dyn Future<Output = Result<(), PipelineError>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
-    }
+fn required_env(name: &str) -> Result<String, AppError> {
+    env::var(name).map_err(|_| AppError::MissingEnv(name.to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::rc::Rc;
 
-    #[derive(Default, Clone)]
-    struct MemoryHistory {
-        restored: bool,
-        appended: Arc<Mutex<Vec<MovieId>>>,
-        persisted: Arc<Mutex<Vec<Vec<MovieId>>>>,
+    use chrono::NaiveDate;
+    use tempfile::tempdir;
+
+    use crate::github::artifacts::ArtifactError;
+
+    #[derive(Clone, Default)]
+    struct MemoryStore {
+        uploaded: Rc<RefCell<Vec<(String, String, Vec<u8>)>>>,
     }
 
-    impl HistoryAccess for MemoryHistory {
-        fn restore(&mut self) -> Result<(), PipelineError> {
-            self.restored = true;
+    impl ArtifactStore for MemoryStore {
+        fn download_artifact(
+            &self,
+            _artifact_name: &str,
+        ) -> Result<Option<Vec<u8>>, ArtifactError> {
+            Ok(None)
+        }
+
+        fn upload_artifact(
+            &self,
+            artifact_name: &str,
+            file_name: &str,
+            content: &[u8],
+        ) -> Result<(), ArtifactError> {
+            self.uploaded.borrow_mut().push((
+                artifact_name.to_string(),
+                file_name.to_string(),
+                content.to_vec(),
+            ));
             Ok(())
         }
-
-        fn append(&mut self, ids: &[MovieId]) -> usize {
-            self.appended.lock().unwrap().extend_from_slice(ids);
-            ids.len()
-        }
-
-        fn persist(&mut self) -> Result<(), PipelineError> {
-            let current = self.appended.lock().unwrap().clone();
-            self.persisted.lock().unwrap().push(current);
-            Ok(())
-        }
-
-        fn contains(&self, id: MovieId) -> bool {
-            self.appended.lock().unwrap().contains(&id)
-        }
     }
 
-    struct MemoryFetcher {
-        releases: Vec<PipelineRelease>,
-    }
-
-    impl ReleaseFetcher for MemoryFetcher {
-        fn fetch<'a>(
-            &'a self,
-            _history: &'a dyn HistoryAccess,
-            _now: SystemTime,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<PipelineRelease>, PipelineError>> + Send + 'a>>
-        {
-            let releases = self.releases.clone();
-            Box::pin(async move { Ok(releases) })
-        }
-    }
-
-    #[derive(Default)]
-    struct MemoryDispatcher {
-        should_fail: bool,
-        delivered: Arc<Mutex<Vec<TelegramMessage>>>,
-    }
-
-    impl MessageDispatcher for MemoryDispatcher {
-        fn send_messages<'a>(
-            &'a self,
-            messages: &'a [TelegramMessage],
-        ) -> Pin<Box<dyn Future<Output = Result<(), PipelineError>> + Send + 'a>> {
-            let should_fail = self.should_fail;
-            let delivered = self.delivered.clone();
-            let messages = messages.to_vec();
-            Box::pin(async move {
-                if should_fail {
-                    return Err(PipelineError::Source(
-                        "тестовая ошибка отправки".to_string(),
-                    ));
-                }
-                delivered.lock().unwrap().extend(messages);
-                Ok(())
-            })
-        }
-    }
-
-    fn sample_release(id: MovieId) -> PipelineRelease {
-        let now = SystemTime::now();
-        let release = DigitalRelease {
+    fn sample_release(id: u64) -> MovieRelease {
+        MovieRelease {
             id,
-            title: format!("Фильм {id}"),
-            release_time: now,
-            display_date: "01.01.2024 10:00".to_string(),
-            locale: "ru".to_string(),
-            platforms: vec!["Кинотеатр".to_string()],
-        };
-        PipelineRelease { id, release }
+            title: format!("Релиз {id}"),
+            release_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата"),
+            original_language: "en".to_string(),
+            popularity: 0.0,
+            homepage: None,
+            watch_providers: Vec::new(),
+        }
     }
 
-    #[tokio::test]
-    async fn history_not_persisted_on_failed_dispatch() {
-        let mut history = MemoryHistory::default();
-        let fetcher = MemoryFetcher {
-            releases: vec![sample_release(10)],
-        };
-        let dispatcher = MemoryDispatcher {
-            should_fail: true,
-            delivered: Arc::new(Mutex::new(Vec::new())),
-        };
-        let config = config::TelegramConfig::single_global_chat(1);
+    #[test]
+    fn release_window_covers_24h_with_overlap() {
+        let now = Utc::now();
+        let window = release_window(now);
 
-        let result = run_pipeline(
-            &mut history,
-            &fetcher,
-            &dispatcher,
-            &config,
-            SystemTime::now(),
-        )
-        .await;
-
-        assert!(result.is_err(), "ожидалась ошибка отправки");
-        assert!(history.persisted.lock().unwrap().is_empty());
-        assert!(history.appended.lock().unwrap().is_empty());
+        assert_eq!(window.end, now);
+        assert_eq!(
+            window.start,
+            now - Duration::hours(24) - Duration::minutes(5)
+        );
     }
 
-    #[tokio::test]
-    async fn history_persisted_after_successful_dispatch() {
-        let mut history = MemoryHistory::default();
-        let fetcher = MemoryFetcher {
-            releases: vec![sample_release(20), sample_release(30)],
-        };
-        let dispatcher = MemoryDispatcher::default();
-        let config = config::TelegramConfig::single_global_chat(1);
+    #[test]
+    fn history_is_persisted_after_new_releases() {
+        let dir = tempdir().expect("временная директория создаётся");
+        let file_path = dir.path().join("history.txt");
+        fs::write(&file_path, b"1\n").expect("история должна записываться");
 
-        run_pipeline(
-            &mut history,
-            &fetcher,
-            &dispatcher,
-            &config,
-            SystemTime::now(),
-        )
-        .await
-        .expect("поток должен завершиться успехом");
+        let store = MemoryStore::default();
+        let mut history = SentHistory::with_store(&file_path, "artifact", store.clone());
+        history.restore().expect("история должна читаться");
 
-        let appended = history.appended.lock().unwrap().clone();
-        assert_eq!(appended, vec![20, 30]);
-        let persisted = history.persisted.lock().unwrap().clone();
-        assert_eq!(persisted, vec![vec![20, 30]]);
+        let releases = vec![sample_release(2)];
+        let inserted = persist_history(&mut history, &releases).expect("персист должен работать");
+
+        assert_eq!(inserted, 1);
+
+        let saved = fs::read_to_string(&file_path).expect("файл истории должен существовать");
+        assert!(saved.contains('2'));
+
+        let uploads = store.uploaded.borrow();
+        assert_eq!(uploads.len(), 1);
+        let (artifact_name, file_name, payload) =
+            uploads.first().expect("должна быть одна загрузка");
+        assert_eq!(artifact_name, "artifact");
+        assert_eq!(file_name, "history.txt");
+        assert!(String::from_utf8_lossy(payload).contains('2'));
     }
 }
