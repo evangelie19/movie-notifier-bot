@@ -1,9 +1,12 @@
+#![allow(dead_code)]
+
 use std::time::{Duration, SystemTime};
 
-use crate::config::TelegramConfig;
+use crate::{config::TelegramConfig, state::MovieId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DigitalRelease {
+    pub id: MovieId,
     pub title: String,
     pub release_time: SystemTime,
     pub display_date: String,
@@ -156,8 +159,14 @@ mod tests {
         }
     }
 
-    fn sample_release(now: SystemTime, offset_hours: u64, title: &str) -> DigitalRelease {
+    fn sample_release(
+        now: SystemTime,
+        offset_hours: u64,
+        title: &str,
+        id: MovieId,
+    ) -> DigitalRelease {
         DigitalRelease {
+            id,
             title: title.to_string(),
             release_time: now - Duration::from_secs(offset_hours * 3600),
             display_date: "01.01.2024 10:00".to_string(),
@@ -179,8 +188,8 @@ mod tests {
         let config = test_config();
         let now = SystemTime::now();
         let releases = vec![
-            sample_release(now, 30, "Далекий релиз"),
-            sample_release(now, 2, "Свежий релиз"),
+            sample_release(now, 30, "Далекий релиз", 1),
+            sample_release(now, 2, "Свежий релиз", 2),
         ];
 
         let messages = build_messages(&releases, &config, now);

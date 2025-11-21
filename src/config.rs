@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatConfig {
     pub chat_id: i64,
