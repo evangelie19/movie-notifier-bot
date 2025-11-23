@@ -13,8 +13,11 @@ mod state;
 mod telegram;
 mod tmdb;
 
+use crate::config::TelegramConfig;
+use crate::formatter::{DigitalRelease, TelegramMessage, build_messages};
 use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
 use crate::state::SentHistory;
+use crate::telegram::{TelegramDispatcher, dispatcher_from_env};
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
@@ -26,10 +29,16 @@ enum AppError {
     MissingEnv(String),
     #[error("некорректное значение GITHUB_REPOSITORY: {0}")]
     InvalidRepositoryFormat(String),
+    #[error("некорректное значение TELEGRAM_CHAT_ID: {0}")]
+    InvalidChatId(String),
     #[error(transparent)]
     State(#[from] state::StateError),
     #[error(transparent)]
     Tmdb(#[from] tmdb::TmdbError),
+    #[error(transparent)]
+    Telegram(#[from] telegram::TelegramError),
+    #[error(transparent)]
+    TelegramConfig(#[from] telegram::ConfigError),
 }
 
 #[tokio::main]
@@ -37,19 +46,38 @@ async fn main() -> Result<(), AppError> {
     let mut history = restore_history()?;
     let tmdb_api_key = required_env("TMDB_API_KEY")?;
     let tmdb_client = TmdbClient::new(tmdb_api_key, history.iter().copied());
+    let chat_id = parse_chat_id(required_env("TELEGRAM_CHAT_ID")?)?;
+    let telegram_config = TelegramConfig::single_global_chat(chat_id);
+    let dispatcher = build_dispatcher(chat_id)?;
 
     let now = Utc::now();
     let window = release_window(now);
     let releases = tmdb_client.fetch_digital_releases(window).await?;
+
+    dispatch_notifications(
+        &dispatcher,
+        &telegram_messages(&releases, &telegram_config, now),
+    )
+    .await?;
 
     persist_history(&mut history, &releases)?;
 
     Ok(())
 }
 
+fn build_dispatcher(chat_id: i64) -> Result<TelegramDispatcher, AppError> {
+    dispatcher_from_env(vec![chat_id]).map_err(AppError::from)
+}
+
 fn release_window(now: DateTime<Utc>) -> ReleaseWindow {
     let start = now - Duration::hours(24) - Duration::minutes(5);
     ReleaseWindow { start, end: now }
+}
+
+fn parse_chat_id(raw: String) -> Result<i64, AppError> {
+    raw.trim()
+        .parse::<i64>()
+        .map_err(|_| AppError::InvalidChatId(raw))
 }
 
 fn persist_history<C: ArtifactStore>(
@@ -64,6 +92,45 @@ fn persist_history<C: ArtifactStore>(
     let inserted = history.append(&ids);
     history.persist()?;
     Ok(inserted)
+}
+
+fn telegram_messages(
+    releases: &[MovieRelease],
+    config: &TelegramConfig,
+    now: DateTime<Utc>,
+) -> Vec<TelegramMessage> {
+    let now_std = now.into();
+    let digital: Vec<DigitalRelease> = releases
+        .iter()
+        .map(|release| DigitalRelease {
+            id: release.id,
+            title: release.title.clone(),
+            release_time: release
+                .release_date
+                .and_hms_opt(0, 0, 0)
+                .expect("корректная дата")
+                .and_utc()
+                .into(),
+            display_date: release.release_date.format("%d.%m.%Y 00:00").to_string(),
+            locale: release.original_language.clone(),
+            platforms: release.watch_providers.clone(),
+        })
+        .collect();
+
+    build_messages(&digital, config, now_std)
+}
+
+async fn dispatch_notifications(
+    dispatcher: &TelegramDispatcher,
+    messages: &[TelegramMessage],
+) -> Result<(), AppError> {
+    for message in messages {
+        dispatcher
+            .send_batch(message.chat_id, [message.text.clone()])
+            .await?;
+    }
+
+    Ok(())
 }
 
 fn restore_history() -> Result<SentHistory<GitHubArtifactsClient>, AppError> {
@@ -176,5 +243,15 @@ mod tests {
         assert_eq!(artifact_name, "artifact");
         assert_eq!(file_name, "history.txt");
         assert!(String::from_utf8_lossy(payload).contains('2'));
+    }
+
+    #[test]
+    fn parse_chat_id_rejects_invalid_values() {
+        let err = parse_chat_id("not-a-number".to_string()).unwrap_err();
+
+        match err {
+            AppError::InvalidChatId(raw) => assert_eq!(raw, "not-a-number"),
+            other => panic!("получено неожиданное значение ошибки: {other:?}"),
+        }
     }
 }
