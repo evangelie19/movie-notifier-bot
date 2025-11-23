@@ -21,7 +21,8 @@ use crate::telegram::{TelegramDispatcher, dispatcher_from_env};
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
-const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
+const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
+const LEGACY_HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -135,8 +136,21 @@ async fn dispatch_notifications(
 
 fn restore_history() -> Result<SentHistory<GitHubArtifactsClient>, AppError> {
     let creds = github_credentials_from_env()?;
-    let mut history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
+    let mut history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds.clone())?;
     history.restore()?;
+    if history.iter().next().is_some() || std::path::Path::new(HISTORY_FILE_PATH).exists() {
+        return Ok(history);
+    }
+
+    let mut legacy = SentHistory::new(HISTORY_FILE_PATH, LEGACY_HISTORY_ARTIFACT_NAME, creds)?;
+    legacy.restore()?;
+    if legacy.iter().next().is_some() || std::path::Path::new(HISTORY_FILE_PATH).exists() {
+        let ids: Vec<u64> = legacy.iter().copied().collect();
+        history.append(&ids);
+        history.persist()?;
+        return Ok(history);
+    }
+
     Ok(history)
 }
 
