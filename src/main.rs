@@ -18,7 +18,7 @@ use crate::state::SentHistory;
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
-const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
+const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -158,7 +158,7 @@ mod tests {
         fs::write(&file_path, b"1\n").expect("история должна записываться");
 
         let store = MemoryStore::default();
-        let mut history = SentHistory::with_store(&file_path, "artifact", store.clone());
+        let mut history = SentHistory::with_store(&file_path, HISTORY_ARTIFACT_NAME, store.clone());
         history.restore().expect("история должна читаться");
 
         let releases = vec![sample_release(2)];
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(uploads.len(), 1);
         let (artifact_name, file_name, payload) =
             uploads.first().expect("должна быть одна загрузка");
-        assert_eq!(artifact_name, "artifact");
+        assert_eq!(artifact_name, HISTORY_ARTIFACT_NAME);
         assert_eq!(file_name, "history.txt");
         assert!(String::from_utf8_lossy(payload).contains('2'));
     }
