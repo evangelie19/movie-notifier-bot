@@ -2,10 +2,11 @@
 
 mod config;
 mod formatter;
+mod orchestrator;
 
 use std::env;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::Utc;
 use thiserror::Error;
 
 mod github;
@@ -13,9 +14,12 @@ mod state;
 mod telegram;
 mod tmdb;
 
-use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
+use crate::config::{ChatConfig, TelegramConfig};
+use crate::github::artifacts::{GitHubArtifactsClient, GitHubCredentials};
+use crate::orchestrator::{Orchestrator, OrchestratorError};
 use crate::state::SentHistory;
-use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
+use crate::telegram::TelegramDispatcher;
+use crate::tmdb::TmdbClient;
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
 const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
@@ -26,155 +30,112 @@ enum AppError {
     MissingEnv(String),
     #[error("некорректное значение GITHUB_REPOSITORY: {0}")]
     InvalidRepositoryFormat(String),
+    #[error("некорректный идентификатор чата Telegram: {0}")]
+    InvalidChatId(String),
     #[error(transparent)]
     State(#[from] state::StateError),
     #[error(transparent)]
-    Tmdb(#[from] tmdb::TmdbError),
+    Orchestrator(#[from] OrchestratorError),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
-    let mut history = restore_history()?;
-    let tmdb_api_key = required_env("TMDB_API_KEY")?;
-    let tmdb_client = TmdbClient::new(tmdb_api_key, history.iter().copied());
+    let config = AppConfig::from_env()?;
+    let mut orchestrator = config.build_orchestrator()?;
 
     let now = Utc::now();
-    let window = release_window(now);
-    let releases = tmdb_client.fetch_digital_releases(window).await?;
+    let summary = orchestrator.run(now).await?;
 
-    persist_history(&mut history, &releases)?;
+    println!("{}", summary.render_markdown());
 
     Ok(())
-}
-
-fn release_window(now: DateTime<Utc>) -> ReleaseWindow {
-    let start = now - Duration::hours(24) - Duration::minutes(5);
-    ReleaseWindow { start, end: now }
-}
-
-fn persist_history<C: ArtifactStore>(
-    history: &mut SentHistory<C>,
-    releases: &[MovieRelease],
-) -> Result<usize, AppError> {
-    if releases.is_empty() {
-        return Ok(0);
-    }
-
-    let ids: Vec<u64> = releases.iter().map(|release| release.id).collect();
-    let inserted = history.append(&ids);
-    history.persist()?;
-    Ok(inserted)
-}
-
-fn restore_history() -> Result<SentHistory<GitHubArtifactsClient>, AppError> {
-    let creds = github_credentials_from_env()?;
-    let mut history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
-    history.restore()?;
-    Ok(history)
-}
-
-fn github_credentials_from_env() -> Result<GitHubCredentials, AppError> {
-    let repo = required_env("GITHUB_REPOSITORY")?;
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or_else(|| AppError::InvalidRepositoryFormat(repo.clone()))?;
-    let token = required_env("GITHUB_TOKEN")?;
-
-    Ok(GitHubCredentials::new(owner, name, token))
 }
 
 fn required_env(name: &str) -> Result<String, AppError> {
     env::var(name).map_err(|_| AppError::MissingEnv(name.to_owned()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::RefCell;
-    use std::fs;
-    use std::rc::Rc;
+#[derive(Debug, Clone)]
+struct AppConfig {
+    tmdb_api_key: String,
+    telegram_token: String,
+    telegram_chats: Vec<i64>,
+    github_repo: String,
+    github_token: String,
+}
 
-    use chrono::NaiveDate;
-    use tempfile::tempdir;
+impl AppConfig {
+    fn from_env() -> Result<Self, AppError> {
+        let tmdb_api_key = required_env("TMDB_API_KEY")?;
+        let telegram_token = required_env("TELEGRAM_BOT_TOKEN")?;
+        let telegram_chats = parse_chat_ids(&required_env("TELEGRAM_CHAT_ID")?)?;
+        let github_repo = required_env("GITHUB_REPOSITORY")?;
+        let github_token = required_env("GITHUB_TOKEN")?;
 
-    use crate::github::artifacts::ArtifactError;
-
-    #[derive(Clone, Default)]
-    struct MemoryStore {
-        uploaded: Rc<RefCell<Vec<(String, String, Vec<u8>)>>>,
+        Ok(Self {
+            tmdb_api_key,
+            telegram_token,
+            telegram_chats,
+            github_repo,
+            github_token,
+        })
     }
 
-    impl ArtifactStore for MemoryStore {
-        fn download_artifact(
-            &self,
-            _artifact_name: &str,
-        ) -> Result<Option<Vec<u8>>, ArtifactError> {
-            Ok(None)
+    fn build_orchestrator(
+        self,
+    ) -> Result<Orchestrator<GitHubArtifactsClient, TmdbClient, TelegramDispatcher>, AppError> {
+        let creds = github_credentials_from_env(&self.github_repo, &self.github_token)?;
+        let history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
+
+        let telegram_config = TelegramConfig {
+            chats: self
+                .telegram_chats
+                .iter()
+                .copied()
+                .map(|chat_id| ChatConfig {
+                    chat_id,
+                    locales: Vec::new(),
+                })
+                .collect(),
+        };
+
+        let tmdb_client = TmdbClient::new(self.tmdb_api_key, std::iter::empty());
+        let dispatcher = TelegramDispatcher::new(self.telegram_token, self.telegram_chats.clone());
+
+        Ok(Orchestrator::new(
+            history,
+            tmdb_client,
+            dispatcher,
+            telegram_config,
+        ))
+    }
+}
+
+fn github_credentials_from_env(repo: &str, token: &str) -> Result<GitHubCredentials, AppError> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| AppError::InvalidRepositoryFormat(repo.to_owned()))?;
+
+    Ok(GitHubCredentials::new(owner, name, token))
+}
+
+fn parse_chat_ids(raw: &str) -> Result<Vec<i64>, AppError> {
+    let mut ids = Vec::new();
+    for value in raw.split(',') {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
         }
 
-        fn upload_artifact(
-            &self,
-            artifact_name: &str,
-            file_name: &str,
-            content: &[u8],
-        ) -> Result<(), ArtifactError> {
-            self.uploaded.borrow_mut().push((
-                artifact_name.to_string(),
-                file_name.to_string(),
-                content.to_vec(),
-            ));
-            Ok(())
-        }
+        let id: i64 = trimmed
+            .parse()
+            .map_err(|_| AppError::InvalidChatId(trimmed.to_owned()))?;
+        ids.push(id);
     }
 
-    fn sample_release(id: u64) -> MovieRelease {
-        MovieRelease {
-            id,
-            title: format!("Релиз {id}"),
-            release_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата"),
-            original_language: "en".to_string(),
-            popularity: 0.0,
-            homepage: None,
-            watch_providers: Vec::new(),
-        }
+    if ids.is_empty() {
+        return Err(AppError::InvalidChatId(raw.to_owned()));
     }
 
-    #[test]
-    fn release_window_covers_24h_with_overlap() {
-        let now = Utc::now();
-        let window = release_window(now);
-
-        assert_eq!(window.end, now);
-        assert_eq!(
-            window.start,
-            now - Duration::hours(24) - Duration::minutes(5)
-        );
-    }
-
-    #[test]
-    fn history_is_persisted_after_new_releases() {
-        let dir = tempdir().expect("временная директория создаётся");
-        let file_path = dir.path().join("history.txt");
-        fs::write(&file_path, b"1\n").expect("история должна записываться");
-
-        let store = MemoryStore::default();
-        let mut history = SentHistory::with_store(&file_path, "artifact", store.clone());
-        history.restore().expect("история должна читаться");
-
-        let releases = vec![sample_release(2)];
-        let inserted = persist_history(&mut history, &releases).expect("персист должен работать");
-
-        assert_eq!(inserted, 1);
-
-        let saved = fs::read_to_string(&file_path).expect("файл истории должен существовать");
-        assert!(saved.contains('2'));
-
-        let uploads = store.uploaded.borrow();
-        assert_eq!(uploads.len(), 1);
-        let (artifact_name, file_name, payload) =
-            uploads.first().expect("должна быть одна загрузка");
-        assert_eq!(artifact_name, "artifact");
-        assert_eq!(file_name, "history.txt");
-        assert!(String::from_utf8_lossy(payload).contains('2'));
-    }
+    Ok(ids)
 }
