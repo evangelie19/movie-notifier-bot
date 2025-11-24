@@ -20,9 +20,16 @@ use crate::orchestrator::{Orchestrator, OrchestratorError};
 use crate::state::SentHistory;
 use crate::telegram::TelegramDispatcher;
 use crate::tmdb::TmdbClient;
+use crate::config::TelegramConfig;
+use crate::formatter::{DigitalRelease, TelegramMessage, build_messages};
+use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
+use crate::state::SentHistory;
+use crate::telegram::{TelegramDispatcher, dispatcher_from_env};
+use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
-const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
+const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
+const LEGACY_HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -30,12 +37,17 @@ enum AppError {
     MissingEnv(String),
     #[error("некорректное значение GITHUB_REPOSITORY: {0}")]
     InvalidRepositoryFormat(String),
-    #[error("некорректный идентификатор чата Telegram: {0}")]
+    #[error("некорректное значение TELEGRAM_CHAT_ID: {0}")]
     InvalidChatId(String),
     #[error(transparent)]
     State(#[from] state::StateError),
     #[error(transparent)]
     Orchestrator(#[from] OrchestratorError),
+    Tmdb(#[from] tmdb::TmdbError),
+    #[error(transparent)]
+    Telegram(#[from] telegram::TelegramError),
+    #[error(transparent)]
+    TelegramConfig(#[from] telegram::ConfigError),
 }
 
 #[tokio::main]
