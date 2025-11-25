@@ -184,10 +184,14 @@ pub enum TelegramError {
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("неизвестное значение окружения BOT_ENV: {0}")]
-    UnknownEnvironment(String),
     #[error("не задан токен Telegram в переменной {var}")]
     MissingToken { var: String },
+    #[error("не задана переменная TELEGRAM_CHAT_ID")]
+    MissingChatIds,
+    #[error("некорректное значение TELEGRAM_CHAT_ID: {value}")]
+    InvalidChatId { value: String },
+    #[error("список TELEGRAM_CHAT_ID пустой")]
+    EmptyChatIds,
 }
 
 #[allow(dead_code)]
@@ -198,12 +202,11 @@ pub enum BotEnvironment {
 }
 
 impl BotEnvironment {
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub fn from_env() -> Self {
         let raw = env::var("BOT_ENV").unwrap_or_else(|_| "dev".to_owned());
         match raw.to_lowercase().as_str() {
-            "dev" => Ok(Self::Dev),
-            "prod" => Ok(Self::Prod),
-            other => Err(ConfigError::UnknownEnvironment(other.to_owned())),
+            "prod" => Self::Prod,
+            _ => Self::Dev,
         }
     }
 
@@ -216,14 +219,46 @@ impl BotEnvironment {
 }
 
 #[allow(dead_code)]
-pub fn dispatcher_from_env(chat_ids: Vec<i64>) -> Result<TelegramDispatcher, ConfigError> {
-    let environment = BotEnvironment::from_env()?;
-    let token_var = environment.token_var();
-    let token = env::var(token_var).map_err(|_| ConfigError::MissingToken {
-        var: token_var.to_owned(),
-    })?;
+pub fn dispatcher_from_env() -> Result<TelegramDispatcher, ConfigError> {
+    let token = read_token_from_env()?;
+    let chat_ids = read_chat_ids_from_env()?;
 
     Ok(TelegramDispatcher::new(token, chat_ids))
+}
+
+pub fn read_token_from_env() -> Result<String, ConfigError> {
+    let environment = BotEnvironment::from_env();
+    let token_var = environment.token_var();
+    env::var(token_var).map_err(|_| ConfigError::MissingToken {
+        var: token_var.to_owned(),
+    })
+}
+
+pub fn read_chat_ids_from_env() -> Result<Vec<i64>, ConfigError> {
+    let raw = env::var("TELEGRAM_CHAT_ID").map_err(|_| ConfigError::MissingChatIds)?;
+    parse_chat_ids(&raw)
+}
+
+pub fn parse_chat_ids(raw: &str) -> Result<Vec<i64>, ConfigError> {
+    let mut ids = Vec::new();
+
+    for value in raw.split(',') {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let id: i64 = trimmed.parse().map_err(|_| ConfigError::InvalidChatId {
+            value: trimmed.to_owned(),
+        })?;
+        ids.push(id);
+    }
+
+    if ids.is_empty() {
+        return Err(ConfigError::EmptyChatIds);
+    }
+
+    Ok(ids)
 }
 
 #[derive(Debug, Deserialize)]

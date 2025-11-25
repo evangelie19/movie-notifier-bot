@@ -18,18 +18,11 @@ use crate::config::{ChatConfig, TelegramConfig};
 use crate::github::artifacts::{GitHubArtifactsClient, GitHubCredentials};
 use crate::orchestrator::{Orchestrator, OrchestratorError};
 use crate::state::SentHistory;
-use crate::telegram::TelegramDispatcher;
+use crate::telegram::{TelegramDispatcher, read_chat_ids_from_env, read_token_from_env};
 use crate::tmdb::TmdbClient;
-use crate::config::TelegramConfig;
-use crate::formatter::{DigitalRelease, TelegramMessage, build_messages};
-use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
-use crate::state::SentHistory;
-use crate::telegram::{TelegramDispatcher, dispatcher_from_env};
-use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
 const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
-const LEGACY_HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -37,12 +30,11 @@ enum AppError {
     MissingEnv(String),
     #[error("некорректное значение GITHUB_REPOSITORY: {0}")]
     InvalidRepositoryFormat(String),
-    #[error("некорректное значение TELEGRAM_CHAT_ID: {0}")]
-    InvalidChatId(String),
     #[error(transparent)]
     State(#[from] state::StateError),
     #[error(transparent)]
     Orchestrator(#[from] OrchestratorError),
+    #[error(transparent)]
     Tmdb(#[from] tmdb::TmdbError),
     #[error(transparent)]
     Telegram(#[from] telegram::TelegramError),
@@ -79,8 +71,8 @@ struct AppConfig {
 impl AppConfig {
     fn from_env() -> Result<Self, AppError> {
         let tmdb_api_key = required_env("TMDB_API_KEY")?;
-        let telegram_token = required_env("TELEGRAM_BOT_TOKEN")?;
-        let telegram_chats = parse_chat_ids(&required_env("TELEGRAM_CHAT_ID")?)?;
+        let telegram_token = read_token_from_env()?;
+        let telegram_chats = read_chat_ids_from_env()?;
         let github_repo = required_env("GITHUB_REPOSITORY")?;
         let github_token = required_env("GITHUB_TOKEN")?;
 
@@ -129,25 +121,4 @@ fn github_credentials_from_env(repo: &str, token: &str) -> Result<GitHubCredenti
         .ok_or_else(|| AppError::InvalidRepositoryFormat(repo.to_owned()))?;
 
     Ok(GitHubCredentials::new(owner, name, token))
-}
-
-fn parse_chat_ids(raw: &str) -> Result<Vec<i64>, AppError> {
-    let mut ids = Vec::new();
-    for value in raw.split(',') {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let id: i64 = trimmed
-            .parse()
-            .map_err(|_| AppError::InvalidChatId(trimmed.to_owned()))?;
-        ids.push(id);
-    }
-
-    if ids.is_empty() {
-        return Err(AppError::InvalidChatId(raw.to_owned()));
-    }
-
-    Ok(ids)
 }
