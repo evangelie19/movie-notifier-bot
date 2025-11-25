@@ -181,13 +181,14 @@ mod tests {
     struct MemoryStore {
         downloaded: Option<Vec<u8>>,
         uploads: RefCell<Vec<(String, String, Vec<u8>)>>,
+        download_requests: RefCell<Vec<String>>,
     }
 
     impl ArtifactStore for MemoryStore {
-        fn download_artifact(
-            &self,
-            _artifact_name: &str,
-        ) -> Result<Option<Vec<u8>>, ArtifactError> {
+        fn download_artifact(&self, artifact_name: &str) -> Result<Option<Vec<u8>>, ArtifactError> {
+            self.download_requests
+                .borrow_mut()
+                .push(artifact_name.to_string());
             Ok(self.downloaded.clone())
         }
 
@@ -206,11 +207,13 @@ mod tests {
         }
     }
 
+    const ARTIFACT_NAME: &str = "sent-movie-ids";
+
     #[test]
     fn append_and_contains_ignore_duplicates() {
         let mut history = SentHistory::with_store(
             "state/sent_movie_ids.txt",
-            "artifact",
+            ARTIFACT_NAME,
             MemoryStore::default(),
         );
 
@@ -229,9 +232,10 @@ mod tests {
         let store = MemoryStore {
             downloaded: Some(b"3\n4\n".to_vec()),
             uploads: RefCell::new(Vec::new()),
+            download_requests: RefCell::new(Vec::new()),
         };
 
-        let mut history = SentHistory::with_store(&file_path, "artifact", store);
+        let mut history = SentHistory::with_store(&file_path, ARTIFACT_NAME, store);
         history.restore().expect("восстановление должно пройти");
 
         let restored = fs::read_to_string(&file_path).expect("файл должен существовать");
@@ -239,6 +243,9 @@ mod tests {
         assert!(history.contains(3));
         assert!(history.contains(4));
         assert!(!history.contains(1));
+
+        let download_requests = history.artifact_store.download_requests.borrow().clone();
+        assert_eq!(download_requests, [ARTIFACT_NAME]);
     }
 
     #[test]
@@ -247,7 +254,7 @@ mod tests {
         let file_path = dir.path().join("history.txt");
 
         let store = MemoryStore::default();
-        let mut history = SentHistory::with_store(&file_path, "artifact", store.clone());
+        let mut history = SentHistory::with_store(&file_path, ARTIFACT_NAME, store.clone());
         history.append(&[7, 5]);
 
         history.persist().expect("состояние должно сохраняться");
@@ -259,7 +266,7 @@ mod tests {
         assert_eq!(uploads.len(), 1);
         let (artifact_name, file_name, payload) =
             uploads.first().expect("должна быть одна загрузка");
-        assert_eq!(artifact_name, "artifact");
+        assert_eq!(artifact_name, ARTIFACT_NAME);
         assert_eq!(file_name, "history.txt");
         assert_eq!(String::from_utf8_lossy(payload).trim(), "5\n7");
     }
