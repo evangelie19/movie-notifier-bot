@@ -14,9 +14,8 @@ use movie_notifier_bot::telegram::{
 };
 use movie_notifier_bot::tmdb::{TmdbClient, TmdbError};
 
-const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
-const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
-const LEGACY_HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
+const DEFAULT_HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
+const DEFAULT_HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -85,7 +84,8 @@ impl AppConfig {
         self,
     ) -> Result<Orchestrator<GitHubArtifactsClient, TmdbClient, TelegramDispatcher>, AppError> {
         let creds = github_credentials_from_env(&self.github_repo, &self.github_token)?;
-        let history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
+        let (history_file, history_artifact) = history_config_from_env();
+        let history = SentHistory::new(history_file, history_artifact, creds)?;
 
         let telegram_config = TelegramConfig {
             chats: self
@@ -117,6 +117,14 @@ fn github_credentials_from_env(repo: &str, token: &str) -> Result<GitHubCredenti
         .ok_or_else(|| AppError::InvalidRepositoryFormat(repo.to_owned()))?;
 
     Ok(GitHubCredentials::new(owner, name, token))
+}
+
+fn history_config_from_env() -> (String, String) {
+    let file_path =
+        env::var("HISTORY_FILE_PATH").unwrap_or_else(|_| DEFAULT_HISTORY_FILE_PATH.to_owned());
+    let artifact_name = env::var("HISTORY_ARTIFACT_NAME")
+        .unwrap_or_else(|_| DEFAULT_HISTORY_ARTIFACT_NAME.to_owned());
+    (file_path, artifact_name)
 }
 
 fn parse_chat_ids(raw: &str) -> Result<Vec<i64>, AppError> {

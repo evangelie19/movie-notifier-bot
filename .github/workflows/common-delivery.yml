@@ -1,0 +1,97 @@
+name: Общая доставка
+
+on:
+  workflow_call:
+    inputs:
+      send_dev:
+        required: false
+        type: boolean
+        default: true
+      send_main:
+        required: false
+        type: boolean
+        default: true
+      rust_log:
+        required: false
+        type: string
+        default: info
+      environment:
+        required: true
+        type: string
+      artifact_scope:
+        required: false
+        type: string
+    secrets:
+      TMDB_API_KEY:
+        required: true
+      TELEGRAM_BOT_TOKEN_DEV:
+        required: true
+      TELEGRAM_BOT_TOKEN_PROD:
+        required: true
+      TELEGRAM_CHAT_ID_DEV:
+        required: true
+      TELEGRAM_CHAT_ID_PROD:
+        required: true
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    environment: ${{ inputs.environment }}
+
+    env:
+      CARGO_TERM_PROGRESS_WHEN: never
+      RUST_LOG: ${{ inputs.rust_log }}
+
+    steps:
+      - name: Получение репозитория
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Подготовка окружения Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Подготовка параметров истории для dev
+        id: dev-history
+        if: inputs.send_dev == true
+        env:
+          SCOPE: ${{ inputs.artifact_scope }}
+        run: |
+          suffix=${SCOPE:+${SCOPE}-}dev
+          echo "file=state/${suffix}/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
+          echo "artifact=sent-movie-ids-${suffix}" >> "$GITHUB_OUTPUT"
+
+      - name: Отправка уведомлений в dev-чат
+        if: inputs.send_dev == true
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_DEV }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID_DEV }}
+          HISTORY_FILE_PATH: ${{ steps.dev-history.outputs.file }}
+          HISTORY_ARTIFACT_NAME: ${{ steps.dev-history.outputs.artifact }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo run --quiet --release
+
+      - name: Подготовка параметров истории для prod
+        id: prod-history
+        if: inputs.send_main == true
+        env:
+          SCOPE: ${{ inputs.artifact_scope }}
+        run: |
+          suffix=${SCOPE:+${SCOPE}-}prod
+          echo "file=state/${suffix}/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
+          echo "artifact=sent-movie-ids-${suffix}" >> "$GITHUB_OUTPUT"
+
+      - name: Отправка уведомлений в основной чат
+        if: inputs.send_main == true
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_PROD }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID_PROD }}
+          HISTORY_FILE_PATH: ${{ steps.prod-history.outputs.file }}
+          HISTORY_ARTIFACT_NAME: ${{ steps.prod-history.outputs.artifact }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo run --quiet --release
