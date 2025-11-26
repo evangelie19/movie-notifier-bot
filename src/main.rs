@@ -1,31 +1,18 @@
 #![allow(dead_code)]
 
-mod config;
-mod formatter;
-mod orchestrator;
-
 use std::env;
 
 use chrono::Utc;
 use thiserror::Error;
 
-mod github;
-mod state;
-mod telegram;
-mod tmdb;
-
-use crate::config::{ChatConfig, TelegramConfig};
-use crate::github::artifacts::{GitHubArtifactsClient, GitHubCredentials};
-use crate::orchestrator::{Orchestrator, OrchestratorError};
-use crate::state::SentHistory;
-use crate::telegram::TelegramDispatcher;
-use crate::tmdb::TmdbClient;
-use crate::config::TelegramConfig;
-use crate::formatter::{DigitalRelease, TelegramMessage, build_messages};
-use crate::github::artifacts::{ArtifactStore, GitHubArtifactsClient, GitHubCredentials};
-use crate::state::SentHistory;
-use crate::telegram::{TelegramDispatcher, dispatcher_from_env};
-use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
+use movie_notifier_bot::config::{ChatConfig, TelegramConfig};
+use movie_notifier_bot::github::artifacts::{GitHubArtifactsClient, GitHubCredentials};
+use movie_notifier_bot::orchestrator::{Orchestrator, OrchestratorError};
+use movie_notifier_bot::state::{SentHistory, StateError};
+use movie_notifier_bot::telegram::{
+    ConfigError as TelegramConfigError, TelegramDispatcher, TelegramError,
+};
+use movie_notifier_bot::tmdb::{TmdbClient, TmdbError};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
 const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
@@ -40,14 +27,15 @@ enum AppError {
     #[error("некорректное значение TELEGRAM_CHAT_ID: {0}")]
     InvalidChatId(String),
     #[error(transparent)]
-    State(#[from] state::StateError),
+    State(#[from] StateError),
     #[error(transparent)]
     Orchestrator(#[from] OrchestratorError),
-    Tmdb(#[from] tmdb::TmdbError),
     #[error(transparent)]
-    Telegram(#[from] telegram::TelegramError),
+    Tmdb(#[from] TmdbError),
     #[error(transparent)]
-    TelegramConfig(#[from] telegram::ConfigError),
+    Telegram(#[from] TelegramError),
+    #[error(transparent)]
+    TelegramConfig(#[from] TelegramConfigError),
 }
 
 #[tokio::main]
