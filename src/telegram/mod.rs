@@ -208,10 +208,8 @@ impl BotEnvironment {
     }
 
     pub fn token_var(&self) -> &'static str {
-        match self {
-            Self::Dev => "TELEGRAM_BOT_TOKEN_DEV",
-            Self::Prod => "TELEGRAM_BOT_TOKEN_PROD",
-        }
+        let _ = self; // подавление предупреждений о неиспользуемом значении до включения Prod
+        "TELEGRAM_BOT_TOKEN"
     }
 }
 
