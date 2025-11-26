@@ -1,0 +1,24 @@
+name: Dev Delivery
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_log:
+        description: "Уровень логирования"
+        required: false
+        default: info
+      artifact_scope:
+        description: "Префикс артефактов истории"
+        required: false
+        default: ""
+
+jobs:
+  deliver_to_dev:
+    uses: ./.github/workflows/common-delivery.yml
+    with:
+      send_dev: true
+      send_main: false
+      rust_log: ${{ inputs.rust_log }}
+      environment: Dev
+      artifact_scope: ${{ inputs.artifact_scope }}
+    secrets: inherit

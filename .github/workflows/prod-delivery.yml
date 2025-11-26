@@ -1,0 +1,35 @@
+name: Prod Delivery
+
+on:
+  workflow_dispatch:
+    inputs:
+      rust_log:
+        description: "Уровень логирования"
+        required: false
+        default: info
+      artifact_scope:
+        description: "Префикс артефактов истории"
+        required: false
+        default: prod
+
+jobs:
+  dry_run_in_dev:
+    uses: ./.github/workflows/common-delivery.yml
+    with:
+      send_dev: true
+      send_main: false
+      rust_log: ${{ inputs.rust_log }}
+      environment: Dev
+      artifact_scope: ${{ inputs.artifact_scope }}
+    secrets: inherit
+
+  deliver_to_prod:
+    needs: dry_run_in_dev
+    uses: ./.github/workflows/common-delivery.yml
+    with:
+      send_dev: false
+      send_main: true
+      rust_log: ${{ inputs.rust_log }}
+      environment: Prod
+      artifact_scope: ${{ inputs.artifact_scope }}
+    secrets: inherit

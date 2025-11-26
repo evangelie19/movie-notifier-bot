@@ -1,0 +1,26 @@
+name: 'Установка Rust'
+description: 'Установка стабильного инструментариума Rust и подготовка кеша зависимостей'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Установка стабильной версии Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        components: clippy, rustfmt
+
+    - name: Настройка кеша cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Предварительная загрузка зависимостей
+      run: cargo fetch
+      shell: bash
