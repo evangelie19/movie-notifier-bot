@@ -8,6 +8,7 @@ on:
 jobs:
   fetch_digital_releases:
     runs-on: ubuntu-latest
+    environment: Dev
     permissions:
       contents: read
       actions: write
@@ -39,8 +40,8 @@ jobs:
       - name: Сборка и запуск бота
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          TELEGRAM_BOT_TOKEN_DEV: ${{ secrets.TELEGRAM_BOT_TOKEN_DEV }}
-          TELEGRAM_BOT_TOKEN_PROD: ${{ secrets.TELEGRAM_BOT_TOKEN_PROD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo run --release

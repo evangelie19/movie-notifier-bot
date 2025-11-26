@@ -24,13 +24,9 @@ on:
     secrets:
       TMDB_API_KEY:
         required: true
-      TELEGRAM_BOT_TOKEN_DEV:
+      BOT_TOKEN:
         required: true
-      TELEGRAM_BOT_TOKEN_PROD:
-        required: true
-      TELEGRAM_CHAT_ID_DEV:
-        required: true
-      TELEGRAM_CHAT_ID_PROD:
+      CHAT_ID:
         required: true
 
 jobs:
@@ -68,8 +64,8 @@ jobs:
         if: inputs.send_dev == true
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_DEV }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID_DEV }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.dev-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.dev-history.outputs.artifact }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,8 +85,8 @@ jobs:
         if: inputs.send_main == true
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN_PROD }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID_PROD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.prod-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.prod-history.outputs.artifact }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
