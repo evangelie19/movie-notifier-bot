@@ -10,9 +10,12 @@ use movie_notifier_bot::state::SentHistory;
 use movie_notifier_bot::tmdb::MovieRelease;
 use tempfile::tempdir;
 
+type UploadedArtifact = (String, String, Vec<u8>);
+type UploadedArtifacts = Arc<RefCell<Vec<UploadedArtifact>>>;
+
 #[derive(Clone, Default)]
 struct MemoryStore {
-    uploaded: Arc<RefCell<Vec<(String, String, Vec<u8>)>>>,
+    uploaded: UploadedArtifacts,
 }
 
 impl ArtifactStore for MemoryStore {
@@ -65,8 +68,8 @@ impl ReleaseDispatcher for TestDispatcher {
 
         Ok(releases
             .iter()
-            .cloned()
             .filter(|release| self.to_send.is_empty() || self.to_send.contains(&release.id))
+            .cloned()
             .collect())
     }
 }

@@ -122,6 +122,9 @@ mod tests {
     use std::fs;
     use std::rc::Rc;
 
+    type UploadedArtifact = (String, String, Vec<u8>);
+    type UploadedArtifacts = Rc<RefCell<Vec<UploadedArtifact>>>;
+
     use chrono::NaiveDate;
     use tempfile::tempdir;
 
@@ -129,7 +132,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct MemoryStore {
-        uploaded: Rc<RefCell<Vec<(String, String, Vec<u8>)>>>,
+        uploaded: UploadedArtifacts,
     }
 
     impl ArtifactStore for MemoryStore {
@@ -218,8 +221,8 @@ mod tests {
             ) -> Result<Vec<MovieRelease>, DispatchError> {
                 Ok(releases
                     .iter()
-                    .cloned()
                     .filter(|release| release.id % 2 == 0)
+                    .cloned()
                     .collect())
             }
         }

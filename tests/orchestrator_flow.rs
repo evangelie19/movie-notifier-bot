@@ -10,9 +10,14 @@ use movie_notifier_bot::tmdb::{MovieRelease, ReleaseWindow};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
+type UploadEntry = (String, String, Vec<u8>);
+type UploadLog = Arc<Mutex<Vec<UploadEntry>>>;
+type SentEntry = (i64, Vec<String>);
+type SentMessages = Arc<Mutex<Vec<SentEntry>>>;
+
 #[derive(Default, Clone)]
 struct MemoryStore {
-    uploads: Arc<Mutex<Vec<(String, String, Vec<u8>)>>>,
+    uploads: UploadLog,
 }
 
 impl ArtifactStore for MemoryStore {
@@ -78,7 +83,7 @@ impl ReleaseProvider for StubProvider {
 
 #[derive(Default, Clone)]
 struct StubDispatcher {
-    sent: Arc<Mutex<Vec<(i64, Vec<String>)>>>,
+    sent: SentMessages,
 }
 
 #[async_trait]
@@ -156,7 +161,8 @@ async fn orchestrator_runs_full_cycle() {
         .last_window
         .lock()
         .expect("блокировка доступна")
-        .clone()
+        .as_ref()
+        .copied()
         .expect("окно должно быть установлено");
     assert_eq!(window.end.timestamp(), now.timestamp());
     assert_eq!(
