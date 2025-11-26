@@ -1,21 +1,28 @@
 # Movie Notifier Bot
 
-This project is a Rust application intended to power a movie notification bot. The crate is configured as a single binary target located at `src/main.rs`.
+Rust-приложение для отправки уведомлений о цифровых релизах фильмов. Бинарная цель расположена в `src/main.rs`.
 
-## Toolchain
+## Инструментарий
 
-- **Rust edition:** [2024 edition](https://doc.rust-lang.org/edition-guide/editions/2024.html)
-- **Update strategy:** Dependencies are kept current by running `cargo update` to pull the latest compatible versions before verifying builds.
+- **Редакция Rust:** [2024 edition](https://doc.rust-lang.org/edition-guide/editions/2024.html).
+- **Обновление зависимостей:** перед сборкой выполняется `cargo update`, чтобы подтянуть совместимые версии.
 
-## Development
+## Окружения и чаты
 
-Build the project locally with:
+- Поддерживается два целевых окружения: **Dev** и **Prod**.
+- На этапе разработки используется только Dev-окружение: бот отправляет сообщения исключительно в DevChat с использованием одинаковых по имени секретов `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`, но с Dev-значениями.
+- Продакшн-окружение будет включено позже и должно отправлять сообщения в ProdChat только после успешной доставки в DevChat. Оно также использует `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID`, но уже из продакшн-набора секретов окружения.
+- Для локального запуска и CI до выхода в прод держите включённым Dev-режим, чтобы избежать путаницы с переменными окружения.
+
+## Разработка
+
+Собрать проект локально:
 
 ```bash
 cargo build
 ```
 
-Run the binary with:
+Запустить бинарник:
 
 ```bash
 cargo run
