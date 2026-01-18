@@ -15,8 +15,10 @@ use tokio::time::sleep;
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
 const SORTING: &str = "primary_release_date.asc";
-const RELEVANT_PRODUCTION_COUNTRIES: [&str; 10] =
-    ["US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR"];
+const RELEVANT_PRODUCTION_COUNTRIES: [&str; 23] = [
+    "US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR", "RU", "NL", "SE", "NO", "DK", "FI",
+    "BE", "IE", "CH", "PL", "CZ", "AT", "HU",
+];
 const EXCLUDED_GENRES: [&str; 4] = ["Documentary", "TV Movie", "Music", "Reality"];
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(5 * 60),
