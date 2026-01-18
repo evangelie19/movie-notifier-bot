@@ -167,7 +167,7 @@ async fn orchestrator_runs_full_cycle() {
     assert_eq!(window.end.timestamp(), now.timestamp());
     assert_eq!(
         window.start.timestamp(),
-        (now - chrono::Duration::hours(24) - chrono::Duration::minutes(5)).timestamp()
+        (now - chrono::Duration::hours(48) - chrono::Duration::minutes(5)).timestamp()
     );
 
     let sent = dispatcher.sent.lock().expect("блокировка доступна").clone();

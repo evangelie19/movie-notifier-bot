@@ -1,5 +1,6 @@
-use std::{collections::HashSet, env, time::Duration};
+use std::{collections::HashSet, env, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -10,9 +11,9 @@ const TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
 const DEFAULT_MAX_RETRIES: usize = 3;
 const DEFAULT_RETRY_DELAYS: &[u64] = &[5, 15, 30];
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramDispatcher {
-    client: Client,
+    transport: Arc<dyn TelegramTransport>,
     chat_ids: HashSet<i64>,
     token: String,
     api_host: String,
@@ -60,17 +61,14 @@ impl TelegramDispatcher {
         let mut retries = 0usize;
 
         loop {
-            let response = self.client.post(url.clone()).json(&payload).send().await?;
+            let response = self.transport.post_json(&url, &payload).await?;
 
-            if response.status().is_success() {
+            if response.status.is_success() {
                 return Ok(());
             }
 
-            let status = response.status();
-            let body = response.text().await.unwrap_or_else(|err| {
-                warn!(?err, "Не удалось прочитать тело ответа Telegram API");
-                String::new()
-            });
+            let status = response.status;
+            let body = response.body;
 
             warn!(
                 target: "telegram_dispatcher",
@@ -113,6 +111,7 @@ pub struct TelegramDispatcherBuilder {
     chat_ids: Vec<i64>,
     base_url: String,
     client: Client,
+    transport: Option<Arc<dyn TelegramTransport>>,
     retry_delays: Vec<Duration>,
     max_retries: usize,
 }
@@ -125,6 +124,7 @@ impl TelegramDispatcherBuilder {
             chat_ids,
             base_url: TELEGRAM_BASE_URL.to_owned(),
             client: Client::new(),
+            transport: None,
             retry_delays: DEFAULT_RETRY_DELAYS
                 .iter()
                 .copied()
@@ -144,6 +144,11 @@ impl TelegramDispatcherBuilder {
         self
     }
 
+    pub fn transport(mut self, transport: Arc<dyn TelegramTransport>) -> Self {
+        self.transport = Some(transport);
+        self
+    }
+
     pub fn retry_delays(mut self, delays: Vec<Duration>) -> Self {
         if delays.is_empty() {
             self.retry_delays = vec![Duration::from_secs(1)];
@@ -160,8 +165,11 @@ impl TelegramDispatcherBuilder {
 
     pub fn build(self) -> TelegramDispatcher {
         let sanitized_base = self.base_url.trim_end_matches('/').to_owned();
+        let transport = self.transport.unwrap_or_else(|| {
+            Arc::new(ReqwestTransport::new(self.client)) as Arc<dyn TelegramTransport>
+        });
         TelegramDispatcher {
-            client: self.client,
+            transport,
             chat_ids: self.chat_ids.into_iter().collect(),
             token: self.token,
             api_host: sanitized_base,
@@ -179,6 +187,49 @@ pub enum TelegramError {
     Transport(#[from] reqwest::Error),
     #[error("ошибка Telegram API: {status} — {body}")]
     Api { status: StatusCode, body: String },
+}
+
+#[async_trait]
+pub trait TelegramTransport: Send + Sync {
+    async fn post_json(
+        &self,
+        url: &str,
+        payload: &SendMessageRequest,
+    ) -> Result<TelegramTransportResponse, reqwest::Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramTransportResponse {
+    pub status: StatusCode,
+    pub body: String,
+}
+
+struct ReqwestTransport {
+    client: Client,
+}
+
+impl ReqwestTransport {
+    fn new(client: Client) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl TelegramTransport for ReqwestTransport {
+    async fn post_json(
+        &self,
+        url: &str,
+        payload: &SendMessageRequest,
+    ) -> Result<TelegramTransportResponse, reqwest::Error> {
+        let response = self.client.post(url).json(payload).send().await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_else(|err| {
+            warn!(?err, "Не удалось прочитать тело ответа Telegram API");
+            String::new()
+        });
+
+        Ok(TelegramTransportResponse { status, body })
+    }
 }
 
 #[allow(dead_code)]
@@ -236,7 +287,7 @@ struct TelegramErrorParameters {
 }
 
 #[derive(Debug, Serialize)]
-struct SendMessageRequest {
+pub struct SendMessageRequest {
     chat_id: i64,
     text: String,
 }
