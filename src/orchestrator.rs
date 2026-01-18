@@ -60,7 +60,7 @@ where
     }
 
     pub fn release_window(now: DateTime<Utc>) -> ReleaseWindow {
-        let start = now - Duration::hours(24) - Duration::minutes(5);
+        let start = now - Duration::hours(48) - Duration::minutes(5);
         ReleaseWindow { start, end: now }
     }
 
@@ -220,7 +220,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn release_window_covers_24h_with_overlap() {
+    fn release_window_covers_48h_with_overlap() {
         let now = Utc::now();
         let window = Orchestrator::<
             crate::github::artifacts::GitHubArtifactsClient,
@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(window.end, now);
         assert_eq!(
             window.start,
-            now - Duration::hours(24) - Duration::minutes(5)
+            now - Duration::hours(48) - Duration::minutes(5)
         );
     }
 }

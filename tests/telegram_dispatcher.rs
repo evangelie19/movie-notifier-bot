@@ -1,22 +1,56 @@
 use std::{
+    collections::VecDeque,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use movie_notifier_bot::telegram::TelegramDispatcher;
-use serde_json::json;
-use tokio::time::timeout;
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+use async_trait::async_trait;
+use movie_notifier_bot::telegram::{
+    SendMessageRequest, TelegramDispatcher, TelegramTransport, TelegramTransportResponse,
 };
+use reqwest::StatusCode;
+use tokio::time::timeout;
 
-fn dispatcher_for(server: &MockServer) -> TelegramDispatcher {
+#[derive(Clone)]
+struct MockTransport {
+    responses: Arc<Mutex<VecDeque<TelegramTransportResponse>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl MockTransport {
+    fn new(responses: Vec<TelegramTransportResponse>) -> Self {
+        Self {
+            responses: Arc::new(Mutex::new(responses.into())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TelegramTransport for MockTransport {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _payload: &SendMessageRequest,
+    ) -> Result<TelegramTransportResponse, reqwest::Error> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut responses = self.responses.lock().expect("очередь ответов доступна");
+        Ok(responses
+            .pop_front()
+            .expect("ответы должны быть подготовлены заранее"))
+    }
+}
+
+fn dispatcher_for(transport: Arc<MockTransport>) -> TelegramDispatcher {
     TelegramDispatcher::builder("TOKEN", vec![1])
-        .base_url(server.uri())
+        .transport(transport)
         .retry_delays(vec![Duration::from_millis(10)])
         .max_retries(3)
         .build()
@@ -24,87 +58,79 @@ fn dispatcher_for(server: &MockServer) -> TelegramDispatcher {
 
 #[tokio::test]
 async fn send_batch_delivers_all_messages() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/botTOKEN/sendMessage"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
-        .expect(2)
-        .mount(&server)
-        .await;
+    let transport = Arc::new(MockTransport::new(vec![
+        TelegramTransportResponse {
+            status: StatusCode::OK,
+            body: String::new(),
+        },
+        TelegramTransportResponse {
+            status: StatusCode::OK,
+            body: String::new(),
+        },
+    ]));
 
-    let dispatcher = dispatcher_for(&server);
+    let dispatcher = dispatcher_for(transport.clone());
     dispatcher
         .send_batch(1, vec!["Первое сообщение", "Второе сообщение"])
         .await
         .expect("отправка должна завершиться успешно");
+
+    assert_eq!(transport.call_count(), 2);
 }
 
 #[tokio::test]
 async fn rate_limit_response_is_retried_with_retry_after() {
-    let server = MockServer::start().await;
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let counter = attempts.clone();
+    let transport = Arc::new(MockTransport::new(vec![
+        TelegramTransportResponse {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: r#"{"ok":false,"parameters":{"retry_after":0}}"#.to_string(),
+        },
+        TelegramTransportResponse {
+            status: StatusCode::OK,
+            body: String::new(),
+        },
+    ]));
 
-    Mock::given(method("POST"))
-        .and(path("/botTOKEN/sendMessage"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = counter.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                ResponseTemplate::new(429).set_body_json(json!({
-                    "ok": false,
-                    "parameters": { "retry_after": 0 }
-                }))
-            } else {
-                ResponseTemplate::new(200).set_body_json(json!({ "ok": true }))
-            }
-        })
-        .expect(2)
-        .mount(&server)
-        .await;
-
-    let dispatcher = dispatcher_for(&server);
+    let dispatcher = dispatcher_for(transport.clone());
     dispatcher
         .send_batch(1, vec!["тестовое сообщение"])
         .await
         .expect("повтор должен завершиться успехом");
 
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.call_count(), 2);
 }
 
 #[tokio::test]
 async fn server_errors_are_retried_before_erroring() {
-    let server = MockServer::start().await;
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let counter = attempts.clone();
+    let transport = Arc::new(MockTransport::new(vec![
+        TelegramTransportResponse {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: String::new(),
+        },
+        TelegramTransportResponse {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: String::new(),
+        },
+        TelegramTransportResponse {
+            status: StatusCode::OK,
+            body: String::new(),
+        },
+    ]));
 
-    Mock::given(method("POST"))
-        .and(path("/botTOKEN/sendMessage"))
-        .respond_with(move |_req: &wiremock::Request| {
-            let call = counter.fetch_add(1, Ordering::SeqCst);
-            if call < 2 {
-                ResponseTemplate::new(500).set_body_json(json!({ "ok": false }))
-            } else {
-                ResponseTemplate::new(200).set_body_json(json!({ "ok": true }))
-            }
-        })
-        .expect(3)
-        .mount(&server)
-        .await;
-
-    let dispatcher = dispatcher_for(&server);
+    let dispatcher = dispatcher_for(transport.clone());
     dispatcher
         .send_batch(1, vec!["запрос"])
         .await
         .expect("должно пройти после повторов");
 
-    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(transport.call_count(), 3);
 }
 
 #[tokio::test]
 async fn unknown_chat_returns_error_without_calling_api() {
-    let server = MockServer::start().await;
+    let transport = Arc::new(MockTransport::new(Vec::new()));
     let dispatcher = TelegramDispatcher::builder("TOKEN", vec![1])
-        .base_url(server.uri())
+        .transport(transport.clone())
         .build();
 
     let send = dispatcher.send_batch(999, vec!["сообщение"]);
@@ -113,5 +139,5 @@ async fn unknown_chat_returns_error_without_calling_api() {
         .expect("future должна завершиться");
 
     assert!(result.is_err());
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(transport.call_count(), 0);
 }
