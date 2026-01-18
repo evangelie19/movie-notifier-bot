@@ -374,8 +374,6 @@ pub fn is_relevant_release(details: &MovieDetails) -> bool {
         .iter()
         .any(|country| RELEVANT_PRODUCTION_COUNTRIES.contains(&country.code.as_str()));
 
-    let has_sufficient_rating = details.vote_count >= 20 && details.vote_average >= 4.0;
-
     let has_excluded_genre = details
         .genres
         .iter()
@@ -386,7 +384,7 @@ pub fn is_relevant_release(details: &MovieDetails) -> bool {
         .map(|minutes| minutes >= 60)
         .unwrap_or(false);
 
-    has_relevant_country && has_sufficient_rating && !has_excluded_genre && has_required_runtime
+    has_relevant_country && !has_excluded_genre && has_required_runtime
 }
 
 #[cfg(test)]
@@ -434,21 +432,13 @@ mod tests {
     }
 
     #[test]
-    fn release_with_low_rating_is_filtered_out() {
+    fn release_without_rating_or_votes_is_still_allowed() {
         let details = make_details(|details| {
-            details.vote_average = 3.5;
+            details.vote_average = 0.0;
+            details.vote_count = 0;
         });
 
-        assert!(!is_relevant_release(&details));
-    }
-
-    #[test]
-    fn release_with_insufficient_votes_is_filtered_out() {
-        let details = make_details(|details| {
-            details.vote_count = 10;
-        });
-
-        assert!(!is_relevant_release(&details));
+        assert!(is_relevant_release(&details));
     }
 
     #[test]
