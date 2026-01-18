@@ -138,7 +138,7 @@ where
             .iter()
             .map(|release| {
                 let naive_time = release
-                    .release_date
+                    .digital_release_date
                     .and_hms_opt(0, 0, 0)
                     .expect("корректная дата релиза");
                 let datetime = DateTime::<Utc>::from_naive_utc_and_offset(naive_time, Utc);
@@ -146,7 +146,7 @@ where
                     id: release.id,
                     title: release.title.clone(),
                     release_time: SystemTime::from(datetime),
-                    display_date: release.release_date.format("%d.%m.%Y").to_string(),
+                    display_date: release.digital_release_date.format("%d.%m.%Y").to_string(),
                     locale: release.original_language.clone(),
                     platforms: release.watch_providers.clone(),
                 }

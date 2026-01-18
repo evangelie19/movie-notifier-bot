@@ -98,10 +98,12 @@ impl MessageDispatcher for StubDispatcher {
 }
 
 fn sample_release(id: u64, title: &str) -> MovieRelease {
+    let release_date = NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата");
     MovieRelease {
         id,
         title: title.to_string(),
-        release_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата"),
+        release_date,
+        digital_release_date: release_date,
         original_language: "ru".to_string(),
         popularity: 10.0,
         homepage: Some("https://example.org".to_string()),

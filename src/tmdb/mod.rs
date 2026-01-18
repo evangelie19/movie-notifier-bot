@@ -15,6 +15,7 @@ use tokio::time::sleep;
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
 const SORTING: &str = "primary_release_date.asc";
+const PRIORITY_DIGITAL_REGIONS: [&str; 8] = ["RU", "US", "GB", "DE", "FR", "IT", "ES", "NL"];
 const RELEVANT_PRODUCTION_COUNTRIES: [&str; 23] = [
     "US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR", "RU", "NL", "SE", "NO", "DK", "FI",
     "BE", "IE", "CH", "PL", "CZ", "AT", "HU",
@@ -51,6 +52,7 @@ pub struct MovieRelease {
     pub id: u64,
     pub title: String,
     pub release_date: NaiveDate,
+    pub digital_release_date: NaiveDate,
     pub original_language: String,
     pub popularity: f64,
     pub homepage: Option<String>,
@@ -144,6 +146,10 @@ impl TmdbClient {
 
             let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
             let details = self.fetch_movie_details(movie.id).await?;
+            let digital_release_date = self
+                .fetch_digital_release_date(movie.id)
+                .await?
+                .unwrap_or(release_date);
 
             if !is_relevant_release(&details) {
                 continue;
@@ -153,6 +159,7 @@ impl TmdbClient {
                 id: movie.id,
                 title: movie.title,
                 release_date,
+                digital_release_date,
                 original_language: movie.original_language,
                 popularity: movie.popularity,
                 homepage: details.homepage,
@@ -186,6 +193,21 @@ impl TmdbClient {
             genres: payload.genres,
             runtime: payload.runtime,
         })
+    }
+
+    pub async fn fetch_digital_release_date(
+        &self,
+        movie_id: u64,
+    ) -> Result<Option<NaiveDate>, TmdbError> {
+        let url = format!("{TMDB_BASE_URL}/movie/{movie_id}/release_dates");
+        let client = self.http.clone();
+        let api_key = self.api_key.clone();
+
+        let request_factory =
+            move || release_dates_request(client.clone(), url.clone(), api_key.clone());
+
+        let payload: ReleaseDatesResponse = self.fetch_json(request_factory).await?;
+        select_digital_release_date(&payload.results)
     }
 
     async fn fetch_json<T, F>(&self, request_factory: F) -> Result<T, TmdbError>
@@ -296,6 +318,27 @@ struct WatchProviderInfo {
     provider_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseDatesResponse {
+    results: Vec<ReleaseDatesRegion>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseDatesRegion {
+    #[serde(rename = "iso_3166_1")]
+    region: String,
+    #[serde(default)]
+    release_dates: Vec<ReleaseDateEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseDateEntry {
+    #[serde(rename = "release_date")]
+    release_date: String,
+    #[serde(rename = "type")]
+    release_type: u8,
+}
+
 #[derive(Debug)]
 pub struct MovieDetails {
     homepage: Option<String>,
@@ -354,6 +397,12 @@ fn movie_request(client: Client, url: String, api_key: String) -> RequestBuilder
     client.get(url).query(&query)
 }
 
+fn release_dates_request(client: Client, url: String, api_key: String) -> RequestBuilder {
+    let query = vec![("api_key".to_string(), api_key)];
+
+    client.get(url).query(&query)
+}
+
 fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<String> {
     let mut providers = BTreeSet::new();
     for region in regions.into_values() {
@@ -368,6 +417,48 @@ fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<Strin
     }
 
     providers.into_iter().collect()
+}
+
+fn select_digital_release_date(
+    results: &[ReleaseDatesRegion],
+) -> Result<Option<NaiveDate>, TmdbError> {
+    let mut by_region: HashMap<String, Vec<NaiveDate>> = HashMap::new();
+
+    for region in results {
+        let mut dates = Vec::new();
+        for entry in &region.release_dates {
+            if entry.release_type != 4 {
+                continue;
+            }
+            if entry.release_date.is_empty() {
+                continue;
+            }
+            dates.push(parse_release_date(&entry.release_date)?);
+        }
+
+        if !dates.is_empty() {
+            by_region.insert(region.region.clone(), dates);
+        }
+    }
+
+    for region in PRIORITY_DIGITAL_REGIONS {
+        if let Some(dates) = by_region.get(region) {
+            return Ok(dates.iter().copied().max());
+        }
+    }
+
+    let mut all_dates = by_region.into_values().flatten();
+    Ok(all_dates
+        .next()
+        .map(|first| all_dates.fold(first, |acc, date| acc.max(date))))
+}
+
+fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(parsed.naive_utc().date());
+    }
+
+    Ok(NaiveDate::parse_from_str(raw, "%Y-%m-%d")?)
 }
 
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
@@ -413,6 +504,20 @@ mod tests {
 
         transform(&mut details);
         details
+    }
+
+    fn make_release_entry(date: &str, release_type: u8) -> ReleaseDateEntry {
+        ReleaseDateEntry {
+            release_date: date.to_string(),
+            release_type,
+        }
+    }
+
+    fn make_region(region: &str, dates: Vec<ReleaseDateEntry>) -> ReleaseDatesRegion {
+        ReleaseDatesRegion {
+            region: region.to_string(),
+            release_dates: dates,
+        }
     }
 
     #[test]
@@ -470,5 +575,56 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn digital_release_date_prefers_priority_region() {
+        let results = vec![
+            make_region("US", vec![make_release_entry("2024-03-10", 4)]),
+            make_region(
+                "RU",
+                vec![
+                    make_release_entry("2024-02-01", 4),
+                    make_release_entry("2024-02-05", 4),
+                ],
+            ),
+        ];
+
+        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        assert_eq!(
+            selected,
+            Some(NaiveDate::from_ymd_opt(2024, 2, 5).expect("валидная дата"))
+        );
+    }
+
+    #[test]
+    fn digital_release_date_falls_back_to_any_region() {
+        let results = vec![
+            make_region("BR", vec![make_release_entry("2024-01-02", 4)]),
+            make_region("CA", vec![make_release_entry("2024-01-05", 4)]),
+        ];
+
+        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        assert_eq!(
+            selected,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 5).expect("валидная дата"))
+        );
+    }
+
+    #[test]
+    fn digital_release_date_ignores_non_digital_entries() {
+        let results = vec![make_region(
+            "RU",
+            vec![
+                make_release_entry("2024-01-01", 3),
+                make_release_entry("2024-01-04", 4),
+            ],
+        )];
+
+        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        assert_eq!(
+            selected,
+            Some(NaiveDate::from_ymd_opt(2024, 1, 4).expect("валидная дата"))
+        );
     }
 }

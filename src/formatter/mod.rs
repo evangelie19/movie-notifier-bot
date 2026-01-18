@@ -93,7 +93,7 @@ pub fn group_releases_by_chat(
 
 fn is_priority(release_time: SystemTime, now: SystemTime) -> bool {
     match now.duration_since(release_time) {
-        Ok(elapsed) => elapsed < Duration::from_secs(24 * 60 * 60),
+        Ok(elapsed) => elapsed <= Duration::from_secs(48 * 60 * 60),
         Err(_) => false,
     }
 }
@@ -188,7 +188,7 @@ mod tests {
         let config = test_config();
         let now = SystemTime::now();
         let releases = vec![
-            sample_release(now, 30, "Далекий релиз", 1),
+            sample_release(now, 50, "Далекий релиз", 1),
             sample_release(now, 2, "Свежий релиз", 2),
         ];
 
