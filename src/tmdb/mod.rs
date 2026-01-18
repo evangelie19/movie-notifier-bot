@@ -331,8 +331,8 @@ fn discover_request(
             "with_release_type".to_string(),
             DIGITAL_RELEASE_TYPE.to_string(),
         ),
-        ("primary_release_date.gte".to_string(), start),
-        ("primary_release_date.lte".to_string(), end),
+        ("release_date.gte".to_string(), start),
+        ("release_date.lte".to_string(), end),
         ("include_adult".to_string(), "false".to_string()),
         ("page".to_string(), page.to_string()),
     ];
