@@ -39,10 +39,12 @@ impl ArtifactStore for MemoryStore {
 }
 
 fn sample_release(id: u64) -> MovieRelease {
+    let release_date = NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата");
     MovieRelease {
         id,
         title: format!("Релиз {id}"),
-        release_date: NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата"),
+        release_date,
+        digital_release_date: release_date,
         original_language: "en".to_string(),
         popularity: 0.0,
         homepage: None,
