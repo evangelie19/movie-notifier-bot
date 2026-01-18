@@ -422,6 +422,7 @@ fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<Strin
 fn select_digital_release_date(
     results: &[ReleaseDatesRegion],
 ) -> Result<Option<NaiveDate>, TmdbError> {
+    let today = Utc::now().date_naive();
     let mut by_region: HashMap<String, Vec<NaiveDate>> = HashMap::new();
 
     for region in results {
@@ -443,14 +444,31 @@ fn select_digital_release_date(
 
     for region in PRIORITY_DIGITAL_REGIONS {
         if let Some(dates) = by_region.get(region) {
-            return Ok(dates.iter().copied().max());
+            return Ok(select_preferred_date(dates.iter().copied(), today));
         }
     }
 
-    let mut all_dates = by_region.into_values().flatten();
-    Ok(all_dates
-        .next()
-        .map(|first| all_dates.fold(first, |acc, date| acc.max(date))))
+    Ok(select_preferred_date(
+        by_region.into_values().flatten(),
+        today,
+    ))
+}
+
+fn select_preferred_date<I>(dates: I, today: NaiveDate) -> Option<NaiveDate>
+where
+    I: Iterator<Item = NaiveDate>,
+{
+    let mut past_min: Option<NaiveDate> = None;
+    let mut all_min: Option<NaiveDate> = None;
+
+    for date in dates {
+        all_min = Some(all_min.map_or(date, |current| current.min(date)));
+        if date <= today {
+            past_min = Some(past_min.map_or(date, |current| current.min(date)));
+        }
+    }
+
+    past_min.or(all_min)
 }
 
 fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
@@ -593,7 +611,7 @@ mod tests {
         let selected = select_digital_release_date(&results).expect("дата выбирается");
         assert_eq!(
             selected,
-            Some(NaiveDate::from_ymd_opt(2024, 2, 5).expect("валидная дата"))
+            Some(NaiveDate::from_ymd_opt(2024, 2, 1).expect("валидная дата"))
         );
     }
 
@@ -607,7 +625,7 @@ mod tests {
         let selected = select_digital_release_date(&results).expect("дата выбирается");
         assert_eq!(
             selected,
-            Some(NaiveDate::from_ymd_opt(2024, 1, 5).expect("валидная дата"))
+            Some(NaiveDate::from_ymd_opt(2024, 1, 2).expect("валидная дата"))
         );
     }
 
@@ -626,5 +644,47 @@ mod tests {
             selected,
             Some(NaiveDate::from_ymd_opt(2024, 1, 4).expect("валидная дата"))
         );
+    }
+
+    #[test]
+    fn digital_release_date_prefers_past_or_today() {
+        let today = Utc::now().date_naive();
+        let past = today
+            .pred_opt()
+            .expect("дата в прошлом должна существовать");
+        let future = today
+            .succ_opt()
+            .expect("дата в будущем должна существовать");
+        let results = vec![make_region(
+            "RU",
+            vec![
+                make_release_entry(&past.to_string(), 4),
+                make_release_entry(&future.to_string(), 4),
+            ],
+        )];
+
+        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        assert_eq!(selected, Some(past));
+    }
+
+    #[test]
+    fn digital_release_date_selects_nearest_future_when_only_future() {
+        let today = Utc::now().date_naive();
+        let first_future = today
+            .succ_opt()
+            .expect("дата в будущем должна существовать");
+        let second_future = first_future
+            .succ_opt()
+            .expect("дата в будущем должна существовать");
+        let results = vec![make_region(
+            "RU",
+            vec![
+                make_release_entry(&second_future.to_string(), 4),
+                make_release_entry(&first_future.to_string(), 4),
+            ],
+        )];
+
+        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        assert_eq!(selected, Some(first_future));
     }
 }
