@@ -4,6 +4,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::{config::TelegramConfig, state::MovieId};
 
+const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DigitalRelease {
     pub id: MovieId,
@@ -105,8 +107,9 @@ pub fn build_messages(
 ) -> Vec<TelegramMessage> {
     group_releases_by_chat(releases, config, now)
         .into_iter()
-        .map(|payload| {
-            let mut lines = vec!["*Новые цифровые релизы*".to_string()];
+        .flat_map(|payload| {
+            let header = "*Новые цифровые релизы*";
+            let mut lines = Vec::new();
             for release in payload.releases {
                 let marker = if release.priority { "🔥" } else { "•" };
                 let title = escape_markdown_v2(&release.title);
@@ -125,8 +128,17 @@ pub fn build_messages(
                 lines.push(format!("{marker} *{title}* — `{date}` \\({platforms}\\)"));
             }
 
-            TelegramMessage::new(payload.chat_id, lines.join("\n"))
+            chunk_lines(payload.chat_id, header, &lines, TELEGRAM_MESSAGE_LIMIT)
         })
+        .collect()
+}
+
+pub fn build_empty_messages(config: &TelegramConfig) -> Vec<TelegramMessage> {
+    let text = escape_markdown_v2("Новых цифровых релизов за окно нет.");
+    config
+        .chats
+        .iter()
+        .map(|chat| TelegramMessage::new(chat.chat_id, text.clone()))
         .collect()
 }
 
@@ -143,6 +155,36 @@ pub fn escape_markdown_v2(text: &str) -> String {
         }
     }
     escaped
+}
+
+fn chunk_lines(
+    chat_id: i64,
+    header: &str,
+    lines: &[String],
+    max_len: usize,
+) -> Vec<TelegramMessage> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut messages = Vec::new();
+    let mut current = header.to_string();
+    for line in lines {
+        let additional = 1 + line.len();
+        if current.len() + additional > max_len {
+            messages.push(TelegramMessage::new(chat_id, current));
+            current = header.to_string();
+        }
+
+        current.push('\n');
+        current.push_str(line);
+    }
+
+    if !current.is_empty() {
+        messages.push(TelegramMessage::new(chat_id, current));
+    }
+
+    messages
 }
 
 #[cfg(test)]
@@ -208,5 +250,22 @@ mod tests {
             escaped, "Спецсимволы \\_\\[\\]\\(\\)<\\>\\#\\-\\=",
             "Must escape Markdown V2 characters"
         );
+    }
+
+    #[test]
+    fn messages_are_chunked_by_limit() {
+        let lines = vec![
+            "1234567".to_string(),
+            "7654321".to_string(),
+            "abcdefg".to_string(),
+        ];
+        let messages = chunk_lines(1, "Header", &lines, 20);
+        assert!(messages.len() > 1, "Сообщения должны быть разбиты");
+        for message in messages {
+            assert!(
+                message.text.len() <= 20,
+                "Сообщение не должно превышать лимит"
+            );
+        }
     }
 }

@@ -5,12 +5,13 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tokio::time::sleep;
+use tracing::info;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
@@ -26,6 +27,7 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(15 * 60),
     Duration::from_secs(30 * 60),
 ];
+const MAX_DISCOVER_PAGES: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum TmdbError {
@@ -102,8 +104,8 @@ impl TmdbClient {
         let url = format!("{TMDB_BASE_URL}/discover/movie");
         let client = self.http.clone();
         let api_key = self.api_key.clone();
-        let start = window.start.to_rfc3339_opts(SecondsFormat::Secs, true);
-        let end = window.end.to_rfc3339_opts(SecondsFormat::Secs, true);
+        let start = format_discover_date(window.start);
+        let end = format_discover_date(window.end);
 
         let request_factory = |page| {
             let client = client.clone();
@@ -126,21 +128,37 @@ impl TmdbClient {
 
         let mut response: DiscoverResponse = self.fetch_json(request_factory(1)).await?;
         let mut movies = response.results;
+        let total_pages = limit_total_pages(response.total_pages);
 
-        if response.total_pages > 1 {
-            for page in 2..=response.total_pages {
+        info!(
+            target: "tmdb",
+            start = %start,
+            end = %end,
+            total_pages = response.total_pages,
+            total_results = response.total_results,
+            limited_pages = total_pages,
+            "Получен ответ TMDB discover"
+        );
+
+        if total_pages > 1 {
+            for page in 2..=total_pages {
                 response = self.fetch_json(request_factory(page)).await?;
                 movies.extend(response.results);
             }
         }
 
         let mut releases = Vec::new();
+        let mut skipped_history = 0usize;
+        let mut skipped_missing_date = 0usize;
+        let mut skipped_irrelevant = 0usize;
         for movie in movies.into_iter() {
             if self.history.contains(&movie.id) {
+                skipped_history += 1;
                 continue;
             }
 
             if movie.release_date.is_empty() {
+                skipped_missing_date += 1;
                 continue;
             }
 
@@ -152,6 +170,7 @@ impl TmdbClient {
                 .unwrap_or(release_date);
 
             if !is_relevant_release(&details) {
+                skipped_irrelevant += 1;
                 continue;
             }
 
@@ -166,6 +185,15 @@ impl TmdbClient {
                 watch_providers: details.watch_providers,
             });
         }
+
+        info!(
+            target: "tmdb",
+            fetched = releases.len(),
+            skipped_history,
+            skipped_missing_date,
+            skipped_irrelevant,
+            "Сформирован список цифровых релизов после фильтров"
+        );
 
         Ok(releases)
     }
@@ -265,6 +293,7 @@ impl TmdbClient {
 #[derive(Debug, Deserialize)]
 struct DiscoverResponse {
     total_pages: u32,
+    total_results: u32,
     results: Vec<DiscoverMovie>,
 }
 
@@ -479,6 +508,14 @@ fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
     Ok(NaiveDate::parse_from_str(raw, "%Y-%m-%d")?)
 }
 
+fn format_discover_date(date: DateTime<Utc>) -> String {
+    date.date_naive().format("%Y-%m-%d").to_string()
+}
+
+fn limit_total_pages(total_pages: u32) -> u32 {
+    total_pages.clamp(1, MAX_DISCOVER_PAGES)
+}
+
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
     let has_relevant_country = details
         .production_countries
@@ -501,6 +538,7 @@ pub fn is_relevant_release(details: &MovieDetails) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::Client;
 
     fn make_details<F>(mut transform: F) -> MovieDetails
     where
@@ -686,5 +724,50 @@ mod tests {
 
         let selected = select_digital_release_date(&results).expect("дата выбирается");
         assert_eq!(selected, Some(first_future));
+    }
+
+    #[test]
+    fn discover_dates_formatted_as_yyyy_mm_dd() {
+        let date = DateTime::<Utc>::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2024, 3, 5)
+                .expect("валидная дата")
+                .and_hms_opt(12, 30, 0)
+                .expect("валидное время"),
+            Utc,
+        );
+        let formatted = format_discover_date(date);
+        assert_eq!(formatted, "2024-03-05");
+    }
+
+    #[test]
+    fn discover_request_includes_formatted_dates() {
+        let client = Client::new();
+        let request = discover_request(
+            client,
+            "https://example.com".to_string(),
+            "token".to_string(),
+            "2024-01-02".to_string(),
+            "2024-01-05".to_string(),
+            1,
+        )
+        .build()
+        .expect("request build");
+
+        let query = request
+            .url()
+            .query()
+            .expect("query string should be present");
+        assert!(query.contains("release_date.gte=2024-01-02"));
+        assert!(query.contains("release_date.lte=2024-01-05"));
+    }
+
+    #[test]
+    fn discover_pagination_is_limited() {
+        assert_eq!(limit_total_pages(1), 1);
+        assert_eq!(limit_total_pages(MAX_DISCOVER_PAGES), MAX_DISCOVER_PAGES);
+        assert_eq!(
+            limit_total_pages(MAX_DISCOVER_PAGES + 4),
+            MAX_DISCOVER_PAGES
+        );
     }
 }
