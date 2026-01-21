@@ -9,7 +9,7 @@ use crate::state::SentHistory;
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
 
 const HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
-const HISTORY_ARTIFACT_NAME: &str = "sent_movie_ids";
+const HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -90,14 +90,20 @@ pub fn persist_history<C: ArtifactStore>(
 
     let ids: Vec<u64> = releases.iter().map(|release| release.id).collect();
     let inserted = history.append(&ids);
-    history.persist()?;
+    if let Err(err) = history.persist() {
+        eprintln!("WARN: не удалось сохранить историю отправок, продолжаю без ошибки: {err}");
+    }
     Ok(inserted)
 }
 
 pub fn restore_history() -> Result<SentHistory<GitHubArtifactsClient>, AppError> {
     let creds = github_credentials_from_env()?;
     let mut history = SentHistory::new(HISTORY_FILE_PATH, HISTORY_ARTIFACT_NAME, creds)?;
-    history.restore()?;
+    if let Err(err) = history.restore() {
+        eprintln!(
+            "WARN: не удалось восстановить историю отправок, продолжаю с пустой историей: {err}"
+        );
+    }
     Ok(history)
 }
 

@@ -76,17 +76,36 @@ impl<C: ArtifactStore> SentHistory<C> {
 
     /// Восстанавливает историю: пытается скачать артефакт и обновить локальный файл.
     pub fn restore(&mut self) -> Result<(), StateError> {
-        if let Some(artifact_bytes) = self.artifact_store.download_artifact(&self.artifact_name)? {
-            self.save_raw(&artifact_bytes)?;
-            self.apply_raw(&artifact_bytes)?;
-            return Ok(());
+        match self.artifact_store.download_artifact(&self.artifact_name) {
+            Ok(Some(artifact_bytes)) => {
+                self.save_raw(&artifact_bytes)?;
+                self.apply_raw(&artifact_bytes)?;
+                Ok(())
+            }
+            Ok(None) => {
+                if self.file_path.exists() {
+                    eprintln!(
+                        "WARN: артефакт истории '{}' не найден, использую локальную историю",
+                        self.artifact_name
+                    );
+                    let bytes = fs::read(&self.file_path)?;
+                    self.apply_raw(&bytes)?;
+                } else {
+                    eprintln!(
+                        "WARN: артефакт истории '{}' не найден, продолжаю с пустой историей",
+                        self.artifact_name
+                    );
+                }
+                Ok(())
+            }
+            Err(err) => {
+                eprintln!(
+                    "WARN: не удалось скачать историю '{}' ({err}), продолжаю с пустой историей",
+                    self.artifact_name
+                );
+                Ok(())
+            }
         }
-
-        if self.file_path.exists() {
-            let bytes = fs::read(&self.file_path)?;
-            self.apply_raw(&bytes)?;
-        }
-        Ok(())
     }
 
     /// Сохраняет текущий список идентификаторов в файл и публикует его как артефакт.
@@ -269,5 +288,39 @@ mod tests {
         assert_eq!(artifact_name, ARTIFACT_NAME);
         assert_eq!(file_name, "history.txt");
         assert_eq!(String::from_utf8_lossy(payload).trim(), "5\n7");
+    }
+
+    #[test]
+    fn restore_download_error_keeps_history_empty() {
+        #[derive(Clone, Default)]
+        struct FailingStore;
+
+        impl ArtifactStore for FailingStore {
+            fn download_artifact(
+                &self,
+                _artifact_name: &str,
+            ) -> Result<Option<Vec<u8>>, ArtifactError> {
+                Err(ArtifactError::Io(io::Error::other("ошибка загрузки")))
+            }
+
+            fn upload_artifact(
+                &self,
+                _artifact_name: &str,
+                _file_name: &str,
+                _content: &[u8],
+            ) -> Result<(), ArtifactError> {
+                Ok(())
+            }
+        }
+
+        let dir = tempdir().expect("временная директория должна создаваться");
+        let file_path = dir.path().join("history.txt");
+        fs::write(&file_path, b"1\n2\n").expect("локальный файл должен записываться");
+
+        let mut history = SentHistory::with_store(&file_path, ARTIFACT_NAME, FailingStore);
+        history.restore().expect("ошибка загрузки не должна падать");
+
+        assert!(!history.contains(1));
+        assert!(!history.contains(2));
     }
 }

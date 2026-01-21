@@ -22,38 +22,15 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
-      - name: Загрузка истории отправок
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: sent-movie-ids
-          path: state
-
-      - name: Подготовка файла истории
-        run: |
-          mkdir -p state
-          if [ ! -f state/sent_movie_ids.txt ]; then
-            echo "Первый запуск: создаю пустую историю" >&2
-            touch state/sent_movie_ids.txt
-          fi
-
       - name: Сборка и запуск бота
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           cargo run --release
-
-      - name: Публикация истории отправок
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sent-movie-ids
-          path: state/sent_movie_ids.txt
-          retention-days: 90
-          if-no-files-found: warn
 
       - name: summarize_run
         if: always()
