@@ -28,6 +28,9 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(30 * 60),
 ];
 const MAX_DISCOVER_PAGES: u32 = 5;
+const MIN_VOTE_COUNT: u32 = 50;
+const MIN_VOTE_AVERAGE: f64 = 5.5;
+const MIN_POPULARITY: f64 = 5.0;
 
 #[derive(Debug, Error)]
 pub enum TmdbError {
@@ -222,12 +225,14 @@ impl TmdbClient {
 
         Ok(MovieDetails {
             homepage: payload.homepage,
+            imdb_id: payload.imdb_id,
             watch_providers,
             production_countries: payload.production_countries,
             vote_average: payload.vote_average,
             vote_count: payload.vote_count,
             genres: payload.genres,
             runtime: payload.runtime,
+            popularity: payload.popularity,
         })
     }
 
@@ -320,6 +325,7 @@ struct DiscoverMovie {
 #[derive(Debug, Deserialize)]
 struct MovieDetailsResponse {
     homepage: Option<String>,
+    imdb_id: Option<String>,
     #[serde(rename = "watch/providers")]
     watch_providers: Option<WatchProvidersEnvelope>,
     #[serde(default)]
@@ -332,6 +338,8 @@ struct MovieDetailsResponse {
     genres: Vec<Genre>,
     #[serde(default)]
     runtime: Option<u32>,
+    #[serde(default)]
+    popularity: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,12 +387,14 @@ struct ReleaseDateEntry {
 #[derive(Debug)]
 pub struct MovieDetails {
     homepage: Option<String>,
+    imdb_id: Option<String>,
     watch_providers: Vec<String>,
     production_countries: Vec<ProductionCountry>,
     vote_average: f64,
     vote_count: u32,
     genres: Vec<Genre>,
     runtime: Option<u32>,
+    popularity: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,6 +541,12 @@ fn limit_total_pages(total_pages: u32) -> u32 {
 }
 
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
+    let has_imdb_id = details
+        .imdb_id
+        .as_deref()
+        .map(|id| !id.trim().is_empty())
+        .unwrap_or(false);
+
     let has_relevant_country = details
         .production_countries
         .iter()
@@ -546,7 +562,15 @@ pub fn is_relevant_release(details: &MovieDetails) -> bool {
         .map(|minutes| minutes >= 60)
         .unwrap_or(false);
 
-    has_relevant_country && !has_excluded_genre && has_required_runtime
+    let meets_popularity_thresholds = details.vote_count >= MIN_VOTE_COUNT
+        && details.vote_average >= MIN_VOTE_AVERAGE
+        && details.popularity >= MIN_POPULARITY;
+
+    has_imdb_id
+        && has_relevant_country
+        && !has_excluded_genre
+        && has_required_runtime
+        && meets_popularity_thresholds
 }
 
 #[cfg(test)]
@@ -560,6 +584,7 @@ mod tests {
     {
         let mut details = MovieDetails {
             homepage: None,
+            imdb_id: Some("tt1234567".to_string()),
             watch_providers: Vec::new(),
             production_countries: vec![ProductionCountry {
                 code: "US".to_string(),
@@ -570,6 +595,7 @@ mod tests {
                 name: "Drama".to_string(),
             }],
             runtime: Some(95),
+            popularity: 8.0,
         };
 
         transform(&mut details);
@@ -609,13 +635,39 @@ mod tests {
     }
 
     #[test]
-    fn release_without_rating_or_votes_is_still_allowed() {
+    fn release_without_imdb_id_is_filtered_out() {
         let details = make_details(|details| {
-            details.vote_average = 0.0;
-            details.vote_count = 0;
+            details.imdb_id = None;
         });
 
-        assert!(is_relevant_release(&details));
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_low_vote_count_is_filtered_out() {
+        let details = make_details(|details| {
+            details.vote_count = 10;
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_low_vote_average_is_filtered_out() {
+        let details = make_details(|details| {
+            details.vote_average = 5.0;
+        });
+
+        assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_low_popularity_is_filtered_out() {
+        let details = make_details(|details| {
+            details.popularity = 3.0;
+        });
+
+        assert!(!is_relevant_release(&details));
     }
 
     #[test]
