@@ -150,6 +150,7 @@ impl TmdbClient {
         let mut releases = Vec::new();
         let mut skipped_history = 0usize;
         let mut skipped_missing_date = 0usize;
+        let mut skipped_outside_window = 0usize;
         let mut skipped_irrelevant = 0usize;
         for movie in movies.into_iter() {
             if self.history.contains(&movie.id) {
@@ -164,10 +165,16 @@ impl TmdbClient {
 
             let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
             let details = self.fetch_movie_details(movie.id).await?;
-            let digital_release_date = self
-                .fetch_digital_release_date(movie.id)
-                .await?
-                .unwrap_or(release_date);
+            let Some(digital_release_date) = self.fetch_digital_release_date(movie.id).await?
+            else {
+                skipped_missing_date += 1;
+                continue;
+            };
+
+            if !date_in_window(digital_release_date, window) {
+                skipped_outside_window += 1;
+                continue;
+            }
 
             if !is_relevant_release(&details) {
                 skipped_irrelevant += 1;
@@ -191,6 +198,7 @@ impl TmdbClient {
             fetched = releases.len(),
             skipped_history,
             skipped_missing_date,
+            skipped_outside_window,
             skipped_irrelevant,
             "Сформирован список цифровых релизов после фильтров"
         );
@@ -512,6 +520,12 @@ fn format_discover_date(date: DateTime<Utc>) -> String {
     date.date_naive().format("%Y-%m-%d").to_string()
 }
 
+fn date_in_window(date: NaiveDate, window: ReleaseWindow) -> bool {
+    let start = window.start.date_naive();
+    let end = window.end.date_naive();
+    date >= start && date <= end
+}
+
 fn limit_total_pages(total_pages: u32) -> u32 {
     total_pages.clamp(1, MAX_DISCOVER_PAGES)
 }
@@ -759,6 +773,35 @@ mod tests {
             .expect("query string should be present");
         assert!(query.contains("release_date.gte=2024-01-02"));
         assert!(query.contains("release_date.lte=2024-01-05"));
+    }
+
+    #[test]
+    fn date_in_window_is_inclusive() {
+        let start = DateTime::<Utc>::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2024, 3, 1)
+                .expect("валидная дата")
+                .and_hms_opt(0, 0, 0)
+                .expect("валидное время"),
+            Utc,
+        );
+        let end = DateTime::<Utc>::from_naive_utc_and_offset(
+            NaiveDate::from_ymd_opt(2024, 3, 5)
+                .expect("валидная дата")
+                .and_hms_opt(23, 59, 59)
+                .expect("валидное время"),
+            Utc,
+        );
+        let window = ReleaseWindow { start, end };
+
+        let inside = NaiveDate::from_ymd_opt(2024, 3, 3).expect("валидная дата");
+        let boundary_start = NaiveDate::from_ymd_opt(2024, 3, 1).expect("валидная дата");
+        let boundary_end = NaiveDate::from_ymd_opt(2024, 3, 5).expect("валидная дата");
+        let outside = NaiveDate::from_ymd_opt(2024, 3, 6).expect("валидная дата");
+
+        assert!(date_in_window(inside, window));
+        assert!(date_in_window(boundary_start, window));
+        assert!(date_in_window(boundary_end, window));
+        assert!(!date_in_window(outside, window));
     }
 
     #[test]
