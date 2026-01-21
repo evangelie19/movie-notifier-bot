@@ -53,12 +53,9 @@ jobs:
       - name: Подготовка параметров истории для dev
         id: dev-history
         if: inputs.send_dev == true
-        env:
-          SCOPE: ${{ inputs.artifact_scope }}
         run: |
-          suffix=${SCOPE:+${SCOPE}-}dev
-          echo "file=state/${suffix}/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
-          echo "artifact=sent-movie-ids-${suffix}" >> "$GITHUB_OUTPUT"
+          echo "file=state/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
+          echo "artifact=sent-movie-ids" >> "$GITHUB_OUTPUT"
 
       - name: Отправка уведомлений в dev-чат
         if: inputs.send_dev == true
@@ -68,18 +65,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.dev-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.dev-history.outputs.artifact }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: cargo run --quiet --release
 
       - name: Подготовка параметров истории для prod
         id: prod-history
         if: inputs.send_main == true
-        env:
-          SCOPE: ${{ inputs.artifact_scope }}
         run: |
-          suffix=${SCOPE:+${SCOPE}-}prod
-          echo "file=state/${suffix}/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
-          echo "artifact=sent-movie-ids-${suffix}" >> "$GITHUB_OUTPUT"
+          echo "file=state/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
+          echo "artifact=sent-movie-ids" >> "$GITHUB_OUTPUT"
 
       - name: Отправка уведомлений в основной чат
         if: inputs.send_main == true
@@ -89,5 +84,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.prod-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.prod-history.outputs.artifact }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: cargo run --quiet --release

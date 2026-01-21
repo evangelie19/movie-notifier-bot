@@ -65,7 +65,11 @@ where
     }
 
     pub async fn run(&mut self, now: DateTime<Utc>) -> Result<RunSummary, OrchestratorError> {
-        self.history.restore()?;
+        if let Err(err) = self.history.restore() {
+            eprintln!(
+                "WARN: не удалось восстановить историю отправок, продолжаю с пустой историей: {err}"
+            );
+        }
         self.release_provider
             .preload_history(self.history.iter().copied());
 
@@ -105,8 +109,10 @@ where
                 .map(|release| release.id)
                 .collect::<Vec<_>>(),
         );
-        if inserted > 0 {
-            self.history.persist()?;
+        if inserted > 0
+            && let Err(err) = self.history.persist()
+        {
+            eprintln!("WARN: не удалось сохранить историю отправок, продолжаю без ошибки: {err}");
         }
 
         Ok(RunSummary {
