@@ -5,10 +5,11 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::config::TelegramConfig;
-use crate::formatter::{DigitalRelease, build_messages};
+use crate::formatter::{DigitalRelease, build_empty_messages, build_messages};
 use crate::state::{MovieId, SentHistory, StateError};
 use crate::telegram::TelegramDispatcher;
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient};
+use tracing::info;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -81,12 +82,27 @@ where
             .map_err(OrchestratorError::Releases)?;
 
         let (unique_releases, duplicates) = self.filter_new_releases(releases);
+        info!(
+            target: "orchestrator",
+            fetched = unique_releases.len() + duplicates,
+            after_history = unique_releases.len(),
+            duplicates,
+            "Отфильтрованы релизы после истории"
+        );
         if unique_releases.is_empty() {
+            let empty_messages = build_empty_messages(&self.telegram_config);
+            let messages_sent = empty_messages.len();
+            for message in empty_messages {
+                self.dispatcher
+                    .send_messages(message.chat_id, vec![message.text])
+                    .await
+                    .map_err(OrchestratorError::Dispatch)?;
+            }
             return Ok(RunSummary {
                 fetched: duplicates,
                 new_releases: 0,
                 duplicates,
-                messages_sent: 0,
+                messages_sent,
                 history_appended: 0,
             });
         }
@@ -94,13 +110,22 @@ where
         let digital_releases = Self::convert_releases(&unique_releases);
         let messages = build_messages(&digital_releases, &self.telegram_config, now.into());
 
-        let mut messages_sent = 0;
+        let mut grouped: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
         for message in messages {
+            grouped
+                .entry(message.chat_id)
+                .or_default()
+                .push(message.text);
+        }
+
+        let mut messages_sent = 0;
+        for (chat_id, messages) in grouped {
+            messages_sent += messages.len();
             self.dispatcher
-                .send_messages(message.chat_id, vec![message.text])
+                .send_messages(chat_id, messages)
                 .await
                 .map_err(OrchestratorError::Dispatch)?;
-            messages_sent += 1;
         }
 
         let inserted = self.history.append(
