@@ -108,7 +108,7 @@ where
         }
 
         let digital_releases = Self::convert_releases(&unique_releases);
-        let messages = build_messages(&digital_releases, &self.telegram_config, now.into());
+        let messages = build_messages(&digital_releases, &self.telegram_config);
 
         let mut grouped: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
@@ -177,9 +177,8 @@ where
                     id: release.id,
                     title: release.title.clone(),
                     release_time: SystemTime::from(datetime),
-                    display_date: release.digital_release_date.format("%d.%m.%Y").to_string(),
+                    display_date: release.digital_release_date.format("%Y-%m-%d").to_string(),
                     locale: release.original_language.clone(),
-                    platforms: release.watch_providers.clone(),
                 }
             })
             .collect()
