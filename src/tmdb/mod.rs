@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -152,25 +152,43 @@ impl TmdbClient {
 
         let mut releases = Vec::new();
         let mut skipped_history = 0usize;
-        let mut skipped_missing_date = 0usize;
+        let mut skipped_missing_original_date = 0usize;
+        let mut skipped_missing_digital_date = 0usize;
         let mut skipped_outside_window = 0usize;
         let mut skipped_irrelevant = 0usize;
+        let mut skipped_old = 0usize;
+        let current_year = window.end.date_naive().year();
         for movie in movies.into_iter() {
             if self.history.contains(&movie.id) {
                 skipped_history += 1;
                 continue;
             }
 
-            if movie.release_date.is_empty() {
-                skipped_missing_date += 1;
+            let Some(original_release_date) =
+                parse_original_release_date(&movie.original_release_date)
+            else {
+                skipped_missing_original_date += 1;
+                continue;
+            };
+            let original_year = original_release_date.year();
+            if !is_recent_original_release(original_year, current_year) {
+                skipped_old += 1;
+                info!(
+                    target: "tmdb",
+                    title = %movie.title,
+                    original_year,
+                    current_year,
+                    "skip_old_movie"
+                );
                 continue;
             }
-
-            let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
+            let release_date = parse_release_date(&movie.release_date)
+                .ok()
+                .unwrap_or(original_release_date);
             let details = self.fetch_movie_details(movie.id).await?;
             let Some(digital_release_date) = self.fetch_digital_release_date(movie.id).await?
             else {
-                skipped_missing_date += 1;
+                skipped_missing_digital_date += 1;
                 continue;
             };
 
@@ -200,9 +218,11 @@ impl TmdbClient {
             target: "tmdb",
             fetched = releases.len(),
             skipped_history,
-            skipped_missing_date,
+            skipped_missing_original_date,
+            skipped_missing_digital_date,
             skipped_outside_window,
             skipped_irrelevant,
+            skipped_old,
             "Сформирован список цифровых релизов после фильтров"
         );
 
@@ -314,6 +334,12 @@ struct DiscoverResponse {
 struct DiscoverMovie {
     id: u64,
     title: String,
+    #[serde(
+        default,
+        rename = "primary_release_date",
+        alias = "original_release_date"
+    )]
+    original_release_date: String,
     #[serde(default)]
     release_date: String,
     #[serde(default)]
@@ -524,6 +550,18 @@ fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
     }
 
     Ok(NaiveDate::parse_from_str(raw, "%Y-%m-%d")?)
+}
+
+fn parse_original_release_date(raw: &str) -> Option<NaiveDate> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+
+    parse_release_date(raw).ok()
+}
+
+fn is_recent_original_release(original_year: i32, current_year: i32) -> bool {
+    original_year >= current_year - 1
 }
 
 fn format_discover_date(date: DateTime<Utc>) -> String {
@@ -864,5 +902,29 @@ mod tests {
             limit_total_pages(MAX_DISCOVER_PAGES + 4),
             MAX_DISCOVER_PAGES
         );
+    }
+
+    #[test]
+    fn original_release_date_missing_is_not_parsed() {
+        assert!(parse_original_release_date("").is_none());
+        assert!(parse_original_release_date("  ").is_none());
+        assert!(parse_original_release_date("not-a-date").is_none());
+    }
+
+    #[test]
+    fn original_release_date_parses_valid_date() {
+        let parsed = parse_original_release_date("2024-02-10").expect("дата парсится");
+        assert_eq!(
+            parsed,
+            NaiveDate::from_ymd_opt(2024, 2, 10).expect("валидная дата")
+        );
+    }
+
+    #[test]
+    fn recent_original_release_allows_current_and_previous_years() {
+        let current_year = 2026;
+        assert!(is_recent_original_release(2026, current_year));
+        assert!(is_recent_original_release(2025, current_year));
+        assert!(!is_recent_original_release(2024, current_year));
     }
 }
