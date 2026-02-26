@@ -8,6 +8,9 @@ jobs:
     name: Run movie notifier bot
     runs-on: ubuntu-latest
     environment: Dev
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,17 +35,49 @@ jobs:
       - name: Fetch dependencies
         run: cargo fetch
 
+      - name: Restore movie history
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state
+
+      - name: Restore tv history
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state
+
       - name: Run bot
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
+          TV_HISTORY_FILE_PATH: state/sent_tv_events.txt
+          TV_HISTORY_ARTIFACT_NAME: sent-tv-events
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RUST_LOG: info
         run: |
           mkdir -p logs
           cargo run --release | tee logs/hourly-run.log
+
+      - name: Upload movie history
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state/sent_movie_ids.txt
+          overwrite: true
+
+      - name: Upload tv history
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state/sent_tv_events.txt
+          overwrite: true
 
       - name: Upload run log
         if: always()

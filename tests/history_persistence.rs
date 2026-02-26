@@ -47,6 +47,8 @@ fn sample_release(id: u64) -> MovieRelease {
         digital_release_date: release_date,
         original_language: "en".to_string(),
         popularity: 0.0,
+        vote_average: None,
+        vote_count: None,
         homepage: None,
         watch_providers: Vec::new(),
     }

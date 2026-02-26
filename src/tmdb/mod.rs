@@ -28,9 +28,9 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(30 * 60),
 ];
 const MAX_DISCOVER_PAGES: u32 = 5;
-const MIN_VOTE_COUNT: u32 = 50;
-const MIN_VOTE_AVERAGE: f64 = 5.5;
-const MIN_POPULARITY: f64 = 5.0;
+const MIN_VOTE_COUNT: u32 = 20;
+const MIN_VOTE_AVERAGE: f64 = 6.8;
+const MIN_POPULARITY: f64 = 0.0;
 
 #[derive(Debug, Error)]
 pub enum TmdbError {
@@ -60,22 +60,51 @@ pub struct MovieRelease {
     pub digital_release_date: NaiveDate,
     pub original_language: String,
     pub popularity: f64,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
     pub homepage: Option<String>,
     pub watch_providers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TvEventKind {
+    Premiere,
+    Season { season_number: u32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct TvEvent {
+    pub show_id: u64,
+    pub show_name: String,
+    pub original_language: String,
+    pub event_date: NaiveDate,
+    pub kind: TvEventKind,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
+    pub popularity: Option<f64>,
+}
+
+impl TvEvent {
+    pub fn event_key(&self) -> String {
+        match self.kind {
+            TvEventKind::Premiere => format!("tv:{}:premiere", self.show_id),
+            TvEventKind::Season { season_number } => {
+                format!("tv:{}:season:{}", self.show_id, season_number)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TmdbClient {
     http: Client,
     api_key: String,
-    history: HashSet<u64>,
 }
 
 impl TmdbClient {
-    pub fn new<S, I>(api_key: S, history: I) -> Self
+    pub fn new<S>(api_key: S) -> Self
     where
         S: Into<String>,
-        I: IntoIterator<Item = u64>,
     {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -85,15 +114,7 @@ impl TmdbClient {
         Self {
             http,
             api_key: api_key.into(),
-            history: history.into_iter().collect(),
         }
-    }
-
-    pub fn append_history<I>(&mut self, ids: I)
-    where
-        I: IntoIterator<Item = u64>,
-    {
-        self.history.extend(ids);
     }
 
     pub async fn fetch_digital_releases(
@@ -151,16 +172,10 @@ impl TmdbClient {
         }
 
         let mut releases = Vec::new();
-        let mut skipped_history = 0usize;
         let mut skipped_missing_date = 0usize;
         let mut skipped_outside_window = 0usize;
         let mut skipped_irrelevant = 0usize;
         for movie in movies.into_iter() {
-            if self.history.contains(&movie.id) {
-                skipped_history += 1;
-                continue;
-            }
-
             if movie.release_date.is_empty() {
                 skipped_missing_date += 1;
                 continue;
@@ -191,6 +206,8 @@ impl TmdbClient {
                 digital_release_date,
                 original_language: movie.original_language,
                 popularity: movie.popularity,
+                vote_average: details.vote_average,
+                vote_count: details.vote_count,
                 homepage: details.homepage,
                 watch_providers: details.watch_providers,
             });
@@ -199,7 +216,6 @@ impl TmdbClient {
         info!(
             target: "tmdb",
             fetched = releases.len(),
-            skipped_history,
             skipped_missing_date,
             skipped_outside_window,
             skipped_irrelevant,
@@ -207,6 +223,105 @@ impl TmdbClient {
         );
 
         Ok(releases)
+    }
+
+    pub async fn fetch_tv_events(&self, window: ReleaseWindow) -> Result<Vec<TvEvent>, TmdbError> {
+        if window.start > window.end {
+            return Err(TmdbError::InvalidWindow);
+        }
+
+        let mut show_ids = HashSet::new();
+        for filter in [TvDiscoverFilter::FirstAirDate, TvDiscoverFilter::AirDate] {
+            let shows = self.fetch_tv_discover(window, filter).await?;
+            for show in shows {
+                show_ids.insert(show.id);
+            }
+        }
+
+        let mut events = Vec::new();
+        let mut skipped_missing_date = 0usize;
+        let mut skipped_outside_window = 0usize;
+        let mut skipped_quality = 0usize;
+
+        for show_id in show_ids {
+            let details = self.fetch_tv_details(show_id).await?;
+            let mut has_premiere = false;
+
+            if let Some(first_air_date) = details.first_air_date.as_deref() {
+                let date = parse_release_date(first_air_date)?;
+                if date_in_window(date, window) {
+                    if passes_quality_filters(
+                        details.vote_average,
+                        details.vote_count,
+                        details.popularity,
+                    ) {
+                        events.push(TvEvent {
+                            show_id,
+                            show_name: details.name.clone(),
+                            original_language: details.original_language.clone(),
+                            event_date: date,
+                            kind: TvEventKind::Premiere,
+                            vote_average: details.vote_average,
+                            vote_count: details.vote_count,
+                            popularity: details.popularity,
+                        });
+                        has_premiere = true;
+                    } else {
+                        skipped_quality += 1;
+                    }
+                } else {
+                    skipped_outside_window += 1;
+                }
+            } else {
+                skipped_missing_date += 1;
+            }
+
+            for season in details.seasons.iter() {
+                let Some(air_date) = season.air_date.as_deref() else {
+                    skipped_missing_date += 1;
+                    continue;
+                };
+                let date = parse_release_date(air_date)?;
+                if !date_in_window(date, window) {
+                    skipped_outside_window += 1;
+                    continue;
+                }
+                if !passes_quality_filters(
+                    details.vote_average,
+                    details.vote_count,
+                    details.popularity,
+                ) {
+                    skipped_quality += 1;
+                    continue;
+                }
+                if has_premiere && season.season_number == 1 {
+                    continue;
+                }
+                events.push(TvEvent {
+                    show_id,
+                    show_name: details.name.clone(),
+                    original_language: details.original_language.clone(),
+                    event_date: date,
+                    kind: TvEventKind::Season {
+                        season_number: season.season_number,
+                    },
+                    vote_average: details.vote_average,
+                    vote_count: details.vote_count,
+                    popularity: details.popularity,
+                });
+            }
+        }
+
+        info!(
+            target: "tmdb",
+            fetched = events.len(),
+            skipped_missing_date,
+            skipped_outside_window,
+            skipped_quality,
+            "Сформирован список событий сериалов"
+        );
+
+        Ok(events)
     }
 
     pub async fn fetch_movie_details(&self, movie_id: u64) -> Result<MovieDetails, TmdbError> {
@@ -234,6 +349,81 @@ impl TmdbClient {
             runtime: payload.runtime,
             popularity: payload.popularity,
         })
+    }
+
+    async fn fetch_tv_details(&self, show_id: u64) -> Result<TvShowDetails, TmdbError> {
+        let url = format!("{TMDB_BASE_URL}/tv/{show_id}");
+        let client = self.http.clone();
+        let api_key = self.api_key.clone();
+
+        let request_factory = move || tv_request(client.clone(), url.clone(), api_key.clone());
+
+        let payload: TvShowDetailsResponse = self.fetch_json(request_factory).await?;
+
+        Ok(TvShowDetails {
+            name: payload.name,
+            original_language: payload.original_language,
+            first_air_date: payload.first_air_date,
+            seasons: payload.seasons,
+            vote_average: payload.vote_average,
+            vote_count: payload.vote_count,
+            popularity: payload.popularity,
+        })
+    }
+
+    async fn fetch_tv_discover(
+        &self,
+        window: ReleaseWindow,
+        filter: TvDiscoverFilter,
+    ) -> Result<Vec<DiscoverTvShow>, TmdbError> {
+        let url = format!("{TMDB_BASE_URL}/discover/tv");
+        let client = self.http.clone();
+        let api_key = self.api_key.clone();
+        let start = format_discover_date(window.start);
+        let end = format_discover_date(window.end);
+
+        let request_factory = |page| {
+            let client = client.clone();
+            let url = url.clone();
+            let api_key = api_key.clone();
+            let start = start.clone();
+            let end = end.clone();
+
+            move || {
+                discover_tv_request(
+                    client.clone(),
+                    url.clone(),
+                    api_key.clone(),
+                    start.clone(),
+                    end.clone(),
+                    page,
+                    filter,
+                )
+            }
+        };
+
+        let mut response: DiscoverTvResponse = self.fetch_json(request_factory(1)).await?;
+        let mut shows = response.results;
+        let total_pages = limit_total_pages(response.total_pages);
+
+        info!(
+            target: "tmdb",
+            start = %start,
+            end = %end,
+            total_pages = response.total_pages,
+            total_results = response.total_results,
+            limited_pages = total_pages,
+            "Получен ответ TMDB discover tv"
+        );
+
+        if total_pages > 1 {
+            for page in 2..=total_pages {
+                response = self.fetch_json(request_factory(page)).await?;
+                shows.extend(response.results);
+            }
+        }
+
+        Ok(shows)
     }
 
     pub async fn fetch_digital_release_date(
@@ -310,6 +500,12 @@ struct DiscoverResponse {
     results: Vec<DiscoverMovie>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TvDiscoverFilter {
+    FirstAirDate,
+    AirDate,
+}
+
 #[derive(Debug, Deserialize)]
 struct DiscoverMovie {
     id: u64,
@@ -323,6 +519,18 @@ struct DiscoverMovie {
 }
 
 #[derive(Debug, Deserialize)]
+struct DiscoverTvResponse {
+    total_pages: u32,
+    total_results: u32,
+    results: Vec<DiscoverTvShow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoverTvShow {
+    id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct MovieDetailsResponse {
     homepage: Option<String>,
     imdb_id: Option<String>,
@@ -330,16 +538,26 @@ struct MovieDetailsResponse {
     watch_providers: Option<WatchProvidersEnvelope>,
     #[serde(default)]
     production_countries: Vec<ProductionCountry>,
-    #[serde(default)]
-    vote_average: f64,
-    #[serde(default)]
-    vote_count: u32,
+    vote_average: Option<f64>,
+    vote_count: Option<u32>,
     #[serde(default)]
     genres: Vec<Genre>,
     #[serde(default)]
     runtime: Option<u32>,
+    popularity: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvShowDetailsResponse {
+    name: String,
     #[serde(default)]
-    popularity: f64,
+    original_language: String,
+    first_air_date: Option<String>,
+    #[serde(default)]
+    seasons: Vec<TvSeason>,
+    vote_average: Option<f64>,
+    vote_count: Option<u32>,
+    popularity: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,11 +608,22 @@ pub struct MovieDetails {
     imdb_id: Option<String>,
     watch_providers: Vec<String>,
     production_countries: Vec<ProductionCountry>,
-    vote_average: f64,
-    vote_count: u32,
+    vote_average: Option<f64>,
+    vote_count: Option<u32>,
     genres: Vec<Genre>,
     runtime: Option<u32>,
-    popularity: f64,
+    popularity: Option<f64>,
+}
+
+#[derive(Debug)]
+struct TvShowDetails {
+    name: String,
+    original_language: String,
+    first_air_date: Option<String>,
+    seasons: Vec<TvSeason>,
+    vote_average: Option<f64>,
+    vote_count: Option<u32>,
+    popularity: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,6 +635,12 @@ struct ProductionCountry {
 #[derive(Debug, Deserialize)]
 struct Genre {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TvSeason {
+    air_date: Option<String>,
+    season_number: u32,
 }
 
 fn discover_request(
@@ -444,8 +679,44 @@ fn movie_request(client: Client, url: String, api_key: String) -> RequestBuilder
     client.get(url).query(&query)
 }
 
+fn tv_request(client: Client, url: String, api_key: String) -> RequestBuilder {
+    let query = vec![("api_key".to_string(), api_key)];
+
+    client.get(url).query(&query)
+}
+
 fn release_dates_request(client: Client, url: String, api_key: String) -> RequestBuilder {
     let query = vec![("api_key".to_string(), api_key)];
+
+    client.get(url).query(&query)
+}
+
+fn discover_tv_request(
+    client: Client,
+    url: String,
+    api_key: String,
+    start: String,
+    end: String,
+    page: u32,
+    filter: TvDiscoverFilter,
+) -> RequestBuilder {
+    let mut query = vec![
+        ("api_key".to_string(), api_key),
+        ("sort_by".to_string(), "first_air_date.asc".to_string()),
+        ("include_adult".to_string(), "false".to_string()),
+        ("page".to_string(), page.to_string()),
+    ];
+
+    match filter {
+        TvDiscoverFilter::FirstAirDate => {
+            query.push(("first_air_date.gte".to_string(), start));
+            query.push(("first_air_date.lte".to_string(), end));
+        }
+        TvDiscoverFilter::AirDate => {
+            query.push(("air_date.gte".to_string(), start));
+            query.push(("air_date.lte".to_string(), end));
+        }
+    }
 
     client.get(url).query(&query)
 }
@@ -540,6 +811,20 @@ fn limit_total_pages(total_pages: u32) -> u32 {
     total_pages.clamp(1, MAX_DISCOVER_PAGES)
 }
 
+fn passes_quality_filters(
+    vote_average: Option<f64>,
+    vote_count: Option<u32>,
+    popularity: Option<f64>,
+) -> bool {
+    let votes_ok = match (vote_average, vote_count) {
+        (Some(average), Some(count)) => average >= MIN_VOTE_AVERAGE && count >= MIN_VOTE_COUNT,
+        _ => true,
+    };
+    let popularity_ok = popularity.is_none_or(|value| value >= MIN_POPULARITY);
+
+    votes_ok && popularity_ok
+}
+
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
     let has_imdb_id = details
         .imdb_id
@@ -562,9 +847,8 @@ pub fn is_relevant_release(details: &MovieDetails) -> bool {
         .map(|minutes| minutes >= 60)
         .unwrap_or(false);
 
-    let meets_popularity_thresholds = details.vote_count >= MIN_VOTE_COUNT
-        && details.vote_average >= MIN_VOTE_AVERAGE
-        && details.popularity >= MIN_POPULARITY;
+    let meets_popularity_thresholds =
+        passes_quality_filters(details.vote_average, details.vote_count, details.popularity);
 
     has_imdb_id
         && has_relevant_country
@@ -589,13 +873,13 @@ mod tests {
             production_countries: vec![ProductionCountry {
                 code: "US".to_string(),
             }],
-            vote_average: 6.5,
-            vote_count: 50,
+            vote_average: Some(7.0),
+            vote_count: Some(50),
             genres: vec![Genre {
                 name: "Drama".to_string(),
             }],
             runtime: Some(95),
-            popularity: 8.0,
+            popularity: Some(1.0),
         };
 
         transform(&mut details);
@@ -646,7 +930,7 @@ mod tests {
     #[test]
     fn release_with_low_vote_count_is_filtered_out() {
         let details = make_details(|details| {
-            details.vote_count = 10;
+            details.vote_count = Some(10);
         });
 
         assert!(!is_relevant_release(&details));
@@ -655,7 +939,7 @@ mod tests {
     #[test]
     fn release_with_low_vote_average_is_filtered_out() {
         let details = make_details(|details| {
-            details.vote_average = 5.0;
+            details.vote_average = Some(6.0);
         });
 
         assert!(!is_relevant_release(&details));
@@ -664,10 +948,70 @@ mod tests {
     #[test]
     fn release_with_low_popularity_is_filtered_out() {
         let details = make_details(|details| {
-            details.popularity = 3.0;
+            details.popularity = Some(-1.0);
         });
 
         assert!(!is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_missing_votes_is_not_filtered() {
+        let details = make_details(|details| {
+            details.vote_average = None;
+            details.vote_count = None;
+        });
+
+        assert!(is_relevant_release(&details));
+    }
+
+    #[test]
+    fn release_with_missing_average_is_not_filtered() {
+        let details = make_details(|details| {
+            details.vote_average = None;
+            details.vote_count = Some(1);
+        });
+
+        assert!(is_relevant_release(&details));
+    }
+
+    #[test]
+    fn quality_filters_skip_missing_values() {
+        assert!(passes_quality_filters(None, None, None));
+        assert!(passes_quality_filters(Some(MIN_VOTE_AVERAGE), None, None));
+        assert!(passes_quality_filters(None, Some(1), None));
+        assert!(!passes_quality_filters(
+            Some(MIN_VOTE_AVERAGE - 0.1),
+            Some(MIN_VOTE_COUNT),
+            None
+        ));
+    }
+
+    #[test]
+    fn tv_event_key_is_generated() {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата");
+        let premiere = TvEvent {
+            show_id: 42,
+            show_name: "Тест".to_string(),
+            original_language: "en".to_string(),
+            event_date: date,
+            kind: TvEventKind::Premiere,
+            vote_average: None,
+            vote_count: None,
+            popularity: None,
+        };
+        let season = TvEvent {
+            show_id: 42,
+            show_name: "Тест".to_string(),
+            original_language: "en".to_string(),
+            event_date: date,
+            kind: TvEventKind::Season { season_number: 3 },
+            vote_average: None,
+            vote_count: None,
+            popularity: None,
+        };
+
+        assert_eq!(premiere.event_key(), "tv:42:premiere");
+        assert_eq!(season.event_key(), "tv:42:season:3");
     }
 
     #[test]
