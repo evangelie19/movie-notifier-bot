@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -173,19 +173,48 @@ impl TmdbClient {
 
         let mut releases = Vec::new();
         let mut skipped_missing_date = 0usize;
+        let mut skipped_history = 0usize;
+        let mut skipped_missing_original_date = 0usize;
+        let mut skipped_missing_digital_date = 0usize;
         let mut skipped_outside_window = 0usize;
         let mut skipped_irrelevant = 0usize;
+        let mut skipped_old = 0usize;
+        let current_year = window.end.date_naive().year();
         for movie in movies.into_iter() {
             if movie.release_date.is_empty() {
                 skipped_missing_date += 1;
+            if self.history.contains(&movie.id) {
+                skipped_history += 1;
                 continue;
             }
 
-            let release_date = NaiveDate::parse_from_str(&movie.release_date, "%Y-%m-%d")?;
-            let details = self.fetch_movie_details(movie.id).await?;
-            let Some(digital_release_date) = self.fetch_digital_release_date(movie.id).await?
+            let Some(original_release_date) =
+                parse_original_release_date(&movie.original_release_date)
             else {
-                skipped_missing_date += 1;
+                skipped_missing_original_date += 1;
+                continue;
+            };
+            let original_year = original_release_date.year();
+            if !is_recent_original_release(original_year, current_year) {
+                skipped_old += 1;
+                info!(
+                    target: "tmdb",
+                    title = %movie.title,
+                    original_year,
+                    current_year,
+                    "skip_old_movie"
+                );
+                continue;
+            }
+            let release_date = parse_release_date(&movie.release_date)
+                .ok()
+                .unwrap_or(original_release_date);
+            let details = self.fetch_movie_details(movie.id).await?;
+            let today = window.end.date_naive();
+            let Some(digital_release_date) =
+                self.fetch_digital_release_date(movie.id, today).await?
+            else {
+                skipped_missing_digital_date += 1;
                 continue;
             };
 
@@ -217,8 +246,12 @@ impl TmdbClient {
             target: "tmdb",
             fetched = releases.len(),
             skipped_missing_date,
+            skipped_history,
+            skipped_missing_original_date,
+            skipped_missing_digital_date,
             skipped_outside_window,
             skipped_irrelevant,
+            skipped_old,
             "Сформирован список цифровых релизов после фильтров"
         );
 
@@ -429,6 +462,7 @@ impl TmdbClient {
     pub async fn fetch_digital_release_date(
         &self,
         movie_id: u64,
+        today: NaiveDate,
     ) -> Result<Option<NaiveDate>, TmdbError> {
         let url = format!("{TMDB_BASE_URL}/movie/{movie_id}/release_dates");
         let client = self.http.clone();
@@ -438,7 +472,7 @@ impl TmdbClient {
             move || release_dates_request(client.clone(), url.clone(), api_key.clone());
 
         let payload: ReleaseDatesResponse = self.fetch_json(request_factory).await?;
-        select_digital_release_date(&payload.results)
+        select_digital_release_date(&payload.results, today)
     }
 
     async fn fetch_json<T, F>(&self, request_factory: F) -> Result<T, TmdbError>
@@ -510,6 +544,12 @@ enum TvDiscoverFilter {
 struct DiscoverMovie {
     id: u64,
     title: String,
+    #[serde(
+        default,
+        rename = "primary_release_date",
+        alias = "original_release_date"
+    )]
+    original_release_date: String,
     #[serde(default)]
     release_date: String,
     #[serde(default)]
@@ -658,8 +698,8 @@ fn discover_request(
             "with_release_type".to_string(),
             DIGITAL_RELEASE_TYPE.to_string(),
         ),
-        ("release_date.gte".to_string(), start),
-        ("release_date.lte".to_string(), end),
+        ("primary_release_date.gte".to_string(), start),
+        ("primary_release_date.lte".to_string(), end),
         ("include_adult".to_string(), "false".to_string()),
         ("page".to_string(), page.to_string()),
     ];
@@ -739,8 +779,8 @@ fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<Strin
 
 fn select_digital_release_date(
     results: &[ReleaseDatesRegion],
+    today: NaiveDate,
 ) -> Result<Option<NaiveDate>, TmdbError> {
-    let today = Utc::now().date_naive();
     let mut by_region: HashMap<String, Vec<NaiveDate>> = HashMap::new();
 
     for region in results {
@@ -776,17 +816,18 @@ fn select_preferred_date<I>(dates: I, today: NaiveDate) -> Option<NaiveDate>
 where
     I: Iterator<Item = NaiveDate>,
 {
-    let mut past_min: Option<NaiveDate> = None;
-    let mut all_min: Option<NaiveDate> = None;
+    let mut past_max: Option<NaiveDate> = None;
+    let mut future_min: Option<NaiveDate> = None;
 
     for date in dates {
-        all_min = Some(all_min.map_or(date, |current| current.min(date)));
         if date <= today {
-            past_min = Some(past_min.map_or(date, |current| current.min(date)));
+            past_max = Some(past_max.map_or(date, |current| current.max(date)));
+        } else {
+            future_min = Some(future_min.map_or(date, |current| current.min(date)));
         }
     }
 
-    past_min.or(all_min)
+    past_max.or(future_min)
 }
 
 fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
@@ -795,6 +836,18 @@ fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
     }
 
     Ok(NaiveDate::parse_from_str(raw, "%Y-%m-%d")?)
+}
+
+fn parse_original_release_date(raw: &str) -> Option<NaiveDate> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+
+    parse_release_date(raw).ok()
+}
+
+fn is_recent_original_release(original_year: i32, current_year: i32) -> bool {
+    original_year >= current_year - 1
 }
 
 fn format_discover_date(date: DateTime<Utc>) -> String {
@@ -1045,6 +1098,7 @@ mod tests {
 
     #[test]
     fn digital_release_date_prefers_priority_region() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
         let results = vec![
             make_region("US", vec![make_release_entry("2024-03-10", 4)]),
             make_region(
@@ -1056,29 +1110,31 @@ mod tests {
             ),
         ];
 
-        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
         assert_eq!(
             selected,
-            Some(NaiveDate::from_ymd_opt(2024, 2, 1).expect("валидная дата"))
+            Some(NaiveDate::from_ymd_opt(2024, 2, 5).expect("валидная дата"))
         );
     }
 
     #[test]
     fn digital_release_date_falls_back_to_any_region() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
         let results = vec![
             make_region("BR", vec![make_release_entry("2024-01-02", 4)]),
             make_region("CA", vec![make_release_entry("2024-01-05", 4)]),
         ];
 
-        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
         assert_eq!(
             selected,
-            Some(NaiveDate::from_ymd_opt(2024, 1, 2).expect("валидная дата"))
+            Some(NaiveDate::from_ymd_opt(2024, 1, 5).expect("валидная дата"))
         );
     }
 
     #[test]
     fn digital_release_date_ignores_non_digital_entries() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
         let results = vec![make_region(
             "RU",
             vec![
@@ -1087,7 +1143,7 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
         assert_eq!(
             selected,
             Some(NaiveDate::from_ymd_opt(2024, 1, 4).expect("валидная дата"))
@@ -1095,14 +1151,38 @@ mod tests {
     }
 
     #[test]
+    fn select_preferred_date_chooses_latest_past_or_today() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
+        let old_past = NaiveDate::from_ymd_opt(2019, 1, 1).expect("валидная дата");
+        let latest_past = NaiveDate::from_ymd_opt(2026, 2, 13).expect("валидная дата");
+
+        let selected = select_preferred_date([old_past, latest_past].into_iter(), today);
+        assert_eq!(selected, Some(latest_past));
+    }
+
+    #[test]
+    fn select_preferred_date_chooses_earliest_future_when_no_past_dates() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
+        let earliest_future = NaiveDate::from_ymd_opt(2026, 2, 15).expect("валидная дата");
+        let later_future = NaiveDate::from_ymd_opt(2026, 2, 20).expect("валидная дата");
+
+        let selected = select_preferred_date([later_future, earliest_future].into_iter(), today);
+        assert_eq!(selected, Some(earliest_future));
+    }
+
+    #[test]
+    fn select_preferred_date_returns_none_for_empty_input() {
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
+
+        let selected = select_preferred_date(std::iter::empty(), today);
+        assert_eq!(selected, None);
+    }
+
+    #[test]
     fn digital_release_date_prefers_past_or_today() {
-        let today = Utc::now().date_naive();
-        let past = today
-            .pred_opt()
-            .expect("дата в прошлом должна существовать");
-        let future = today
-            .succ_opt()
-            .expect("дата в будущем должна существовать");
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
+        let past = NaiveDate::from_ymd_opt(2026, 2, 13).expect("валидная дата");
+        let future = NaiveDate::from_ymd_opt(2026, 2, 15).expect("валидная дата");
         let results = vec![make_region(
             "RU",
             vec![
@@ -1111,19 +1191,15 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
         assert_eq!(selected, Some(past));
     }
 
     #[test]
     fn digital_release_date_selects_nearest_future_when_only_future() {
-        let today = Utc::now().date_naive();
-        let first_future = today
-            .succ_opt()
-            .expect("дата в будущем должна существовать");
-        let second_future = first_future
-            .succ_opt()
-            .expect("дата в будущем должна существовать");
+        let today = NaiveDate::from_ymd_opt(2026, 2, 14).expect("валидная дата");
+        let first_future = NaiveDate::from_ymd_opt(2026, 2, 15).expect("валидная дата");
+        let second_future = NaiveDate::from_ymd_opt(2026, 2, 16).expect("валидная дата");
         let results = vec![make_region(
             "RU",
             vec![
@@ -1132,7 +1208,7 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
         assert_eq!(selected, Some(first_future));
     }
 
@@ -1167,8 +1243,8 @@ mod tests {
             .url()
             .query()
             .expect("query string should be present");
-        assert!(query.contains("release_date.gte=2024-01-02"));
-        assert!(query.contains("release_date.lte=2024-01-05"));
+        assert!(query.contains("primary_release_date.gte=2024-01-02"));
+        assert!(query.contains("primary_release_date.lte=2024-01-05"));
     }
 
     #[test]
@@ -1208,5 +1284,29 @@ mod tests {
             limit_total_pages(MAX_DISCOVER_PAGES + 4),
             MAX_DISCOVER_PAGES
         );
+    }
+
+    #[test]
+    fn original_release_date_missing_is_not_parsed() {
+        assert!(parse_original_release_date("").is_none());
+        assert!(parse_original_release_date("  ").is_none());
+        assert!(parse_original_release_date("not-a-date").is_none());
+    }
+
+    #[test]
+    fn original_release_date_parses_valid_date() {
+        let parsed = parse_original_release_date("2024-02-10").expect("дата парсится");
+        assert_eq!(
+            parsed,
+            NaiveDate::from_ymd_opt(2024, 2, 10).expect("валидная дата")
+        );
+    }
+
+    #[test]
+    fn recent_original_release_allows_current_and_previous_years() {
+        let current_year = 2026;
+        assert!(is_recent_original_release(2026, current_year));
+        assert!(is_recent_original_release(2025, current_year));
+        assert!(!is_recent_original_release(2024, current_year));
     }
 }
