@@ -95,6 +95,8 @@ impl<C: ArtifactStore> SentHistory<C> {
                         "WARN: артефакт истории '{}' не найден, продолжаю с пустой историей",
                         self.artifact_name
                     );
+                    self.save_raw(&[])?;
+                    self.ids.clear();
                 }
                 Ok(())
             }
@@ -103,6 +105,13 @@ impl<C: ArtifactStore> SentHistory<C> {
                     "WARN: не удалось скачать историю '{}' ({err}), продолжаю с пустой историей",
                     self.artifact_name
                 );
+                if self.file_path.exists() {
+                    let bytes = fs::read(&self.file_path)?;
+                    self.apply_raw(&bytes)?;
+                } else {
+                    self.save_raw(&[])?;
+                    self.ids.clear();
+                }
                 Ok(())
             }
         }
@@ -149,6 +158,152 @@ impl<C: ArtifactStore> SentHistory<C> {
         self.ids
             .iter()
             .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn save_raw(&self, data: &[u8]) -> Result<(), StateError> {
+        if let Some(parent) = self.file_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&self.file_path, data)?;
+        Ok(())
+    }
+}
+
+/// Хранилище отправленных событий сериалов (ключи вида tv:<id>:premiere).
+pub struct SentEventHistory<C: ArtifactStore = GitHubArtifactsClient> {
+    file_path: PathBuf,
+    artifact_name: String,
+    keys: BTreeSet<String>,
+    artifact_store: C,
+}
+
+impl SentEventHistory<GitHubArtifactsClient> {
+    /// Создаёт продовую реализацию, работающую с GitHub Artifacts API.
+    pub fn new(
+        file_path: impl Into<PathBuf>,
+        artifact_name: impl Into<String>,
+        credentials: GitHubCredentials,
+    ) -> Result<Self, StateError> {
+        let client = GitHubArtifactsClient::new(credentials)?;
+        Ok(Self::with_store(file_path, artifact_name, client))
+    }
+}
+
+impl<C: ArtifactStore> SentEventHistory<C> {
+    /// Конструктор, позволяющий подменить источник артефактов (например, в тестах).
+    pub fn with_store(
+        file_path: impl Into<PathBuf>,
+        artifact_name: impl Into<String>,
+        artifact_store: C,
+    ) -> Self {
+        Self {
+            file_path: file_path.into(),
+            artifact_name: artifact_name.into(),
+            keys: BTreeSet::new(),
+            artifact_store,
+        }
+    }
+
+    /// Проверяет, присутствует ли ключ события в истории.
+    pub fn contains(&self, key: &str) -> bool {
+        self.keys.contains(key)
+    }
+
+    /// Добавляет список новых ключей, возвращая количество реально вставленных значений.
+    pub fn append(&mut self, new_keys: &[String]) -> usize {
+        let mut inserted = 0;
+        for key in new_keys {
+            if self.keys.insert(key.clone()) {
+                inserted += 1;
+            }
+        }
+        inserted
+    }
+
+    /// Восстанавливает историю: пытается скачать артефакт и обновить локальный файл.
+    pub fn restore(&mut self) -> Result<(), StateError> {
+        match self.artifact_store.download_artifact(&self.artifact_name) {
+            Ok(Some(artifact_bytes)) => {
+                self.save_raw(&artifact_bytes)?;
+                self.apply_raw(&artifact_bytes)?;
+                Ok(())
+            }
+            Ok(None) => {
+                if self.file_path.exists() {
+                    eprintln!(
+                        "WARN: артефакт истории '{}' не найден, использую локальную историю",
+                        self.artifact_name
+                    );
+                    let bytes = fs::read(&self.file_path)?;
+                    self.apply_raw(&bytes)?;
+                } else {
+                    eprintln!(
+                        "WARN: артефакт истории '{}' не найден, продолжаю с пустой историей",
+                        self.artifact_name
+                    );
+                    self.save_raw(&[])?;
+                    self.keys.clear();
+                }
+                Ok(())
+            }
+            Err(err) => {
+                eprintln!(
+                    "WARN: не удалось скачать историю '{}' ({err}), продолжаю с пустой историей",
+                    self.artifact_name
+                );
+                if self.file_path.exists() {
+                    let bytes = fs::read(&self.file_path)?;
+                    self.apply_raw(&bytes)?;
+                } else {
+                    self.save_raw(&[])?;
+                    self.keys.clear();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Сохраняет текущий список ключей в файл и публикует его как артефакт.
+    pub fn persist(&mut self) -> Result<(), StateError> {
+        let raw = self.render_file();
+        self.save_raw(raw.as_bytes())?;
+        let file_name = self
+            .file_path
+            .file_name()
+            .ok_or_else(|| StateError::MissingFileName(self.file_path.clone()))?
+            .to_string_lossy()
+            .to_string();
+        self.artifact_store
+            .upload_artifact(&self.artifact_name, &file_name, raw.as_bytes())?;
+        Ok(())
+    }
+
+    fn apply_raw(&mut self, data: &[u8]) -> Result<(), StateError> {
+        if data.is_empty() {
+            self.keys.clear();
+            return Ok(());
+        }
+        let text = String::from_utf8(data.to_vec())?;
+        let mut parsed = BTreeSet::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            parsed.insert(trimmed.to_string());
+        }
+        self.keys = parsed;
+        Ok(())
+    }
+
+    fn render_file(&self) -> String {
+        self.keys
+            .iter()
+            .map(|key| key.to_string())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -291,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_download_error_keeps_history_empty() {
+    fn restore_download_error_falls_back_to_disk() {
         #[derive(Clone, Default)]
         struct FailingStore;
 
@@ -320,7 +475,25 @@ mod tests {
         let mut history = SentHistory::with_store(&file_path, ARTIFACT_NAME, FailingStore);
         history.restore().expect("ошибка загрузки не должна падать");
 
-        assert!(!history.contains(1));
-        assert!(!history.contains(2));
+        assert!(history.contains(1));
+        assert!(history.contains(2));
+    }
+
+    #[test]
+    fn event_history_appends_and_deduplicates() {
+        let mut history = SentEventHistory::with_store(
+            "state/sent_tv_events.txt",
+            "sent-tv-events",
+            MemoryStore::default(),
+        );
+
+        let keys = [
+            "tv:1:premiere".to_string(),
+            "tv:1:premiere".to_string(),
+            "tv:1:season:2".to_string(),
+        ];
+        assert_eq!(history.append(&keys), 2);
+        assert!(history.contains("tv:1:premiere"));
+        assert!(history.contains("tv:1:season:2"));
     }
 }

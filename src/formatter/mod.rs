@@ -1,34 +1,48 @@
 #![allow(dead_code)]
 
-use std::time::SystemTime;
+use std::cmp::Ordering;
 
-use crate::{config::TelegramConfig, state::MovieId};
+use chrono::{Datelike, NaiveDate};
+
+use crate::config::TelegramConfig;
 
 const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DigitalRelease {
-    pub id: MovieId,
-    pub title: String,
-    pub release_time: SystemTime,
-    pub display_date: String,
-    pub locale: String,
+pub enum ReleaseKind {
+    Movie,
+    TvPremiere,
+    TvSeason { season_number: u32 },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DigitalRelease {
+    pub id: u64,
+    pub title: String,
+    pub event_date: NaiveDate,
+    pub locale: String,
+    pub kind: ReleaseKind,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
+    pub event_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatRelease {
     pub title: String,
-    pub release_time: SystemTime,
-    pub display_date: String,
+    pub event_date: NaiveDate,
+    pub kind: ReleaseKind,
+    pub vote_average: Option<f64>,
+    pub vote_count: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatPayload {
     pub chat_id: i64,
     pub releases: Vec<ChatRelease>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TelegramMessage {
     pub chat_id: i64,
     pub text: String,
@@ -49,6 +63,44 @@ impl TelegramMessage {
     }
 }
 
+pub fn sort_releases_by_priority(releases: &mut [DigitalRelease]) {
+    releases.sort_by(compare_release_priority);
+}
+
+fn compare_release_priority(a: &DigitalRelease, b: &DigitalRelease) -> Ordering {
+    b.event_date
+        .cmp(&a.event_date)
+        .then_with(|| compare_optional_f64(b.vote_average, a.vote_average))
+        .then_with(|| compare_optional_u32(b.vote_count, a.vote_count))
+        .then_with(|| a.title.cmp(&b.title))
+}
+
+fn compare_chat_release_priority(a: &ChatRelease, b: &ChatRelease) -> Ordering {
+    b.event_date
+        .cmp(&a.event_date)
+        .then_with(|| compare_optional_f64(b.vote_average, a.vote_average))
+        .then_with(|| compare_optional_u32(b.vote_count, a.vote_count))
+        .then_with(|| a.title.cmp(&b.title))
+}
+
+fn compare_optional_f64(left: Option<f64>, right: Option<f64>) -> Ordering {
+    match (left, right) {
+        (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_optional_u32(left: Option<u32>, right: Option<u32>) -> Ordering {
+    match (left, right) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
 pub fn group_releases_by_chat(
     releases: &[DigitalRelease],
     config: &TelegramConfig,
@@ -61,8 +113,10 @@ pub fn group_releases_by_chat(
             .filter(|release| chat.matches_locale(&release.locale))
             .map(|release| ChatRelease {
                 title: release.title.clone(),
-                release_time: release.release_time,
-                display_date: release.display_date.clone(),
+                event_date: release.event_date,
+                kind: release.kind.clone(),
+                vote_average: release.vote_average,
+                vote_count: release.vote_count,
             })
             .collect();
 
@@ -70,10 +124,7 @@ pub fn group_releases_by_chat(
             continue;
         }
 
-        chat_releases.sort_by(|a, b| match b.release_time.cmp(&a.release_time) {
-            std::cmp::Ordering::Equal => a.title.cmp(&b.title),
-            other => other,
-        });
+        chat_releases.sort_by(compare_chat_release_priority);
 
         payloads.push(ChatPayload {
             chat_id: chat.chat_id,
@@ -94,9 +145,24 @@ pub fn build_messages(
             let header = "";
             let mut lines = Vec::new();
             for release in payload.releases {
-                let title = escape_markdown_v2(&release.title);
-                let date = escape_markdown_v2(&release.display_date);
-                lines.push(format!("🔥 {title} — {date}"));
+                let line = match release.kind {
+                    ReleaseKind::Movie => {
+                        let title = escape_markdown_v2(&release.title);
+                        let date =
+                            escape_markdown_v2(&release.event_date.format("%Y-%m-%d").to_string());
+                        format!("🔥 {title} — {date}")
+                    }
+                    ReleaseKind::TvPremiere => {
+                        let title = escape_markdown_v2(&release.title);
+                        let year = release.event_date.year();
+                        format!("📺 Премьера сериала: {title} ({year})")
+                    }
+                    ReleaseKind::TvSeason { season_number } => {
+                        let title = escape_markdown_v2(&release.title);
+                        format!("📺 Новый сезон: {title} — сезон {season_number}")
+                    }
+                };
+                lines.push(line);
             }
 
             chunk_lines(payload.chat_id, header, &lines, TELEGRAM_MESSAGE_LIMIT)
@@ -105,7 +171,7 @@ pub fn build_messages(
 }
 
 pub fn build_empty_messages(config: &TelegramConfig) -> Vec<TelegramMessage> {
-    let text = escape_markdown_v2("Новых цифровых релизов нет.");
+    let text = escape_markdown_v2("Новых релизов нет.");
     config
         .chats
         .iter()
@@ -168,7 +234,6 @@ fn chunk_lines(
 mod tests {
     use super::*;
     use crate::config::ChatConfig;
-    use std::time::Duration;
 
     fn test_config() -> TelegramConfig {
         TelegramConfig {
@@ -179,18 +244,16 @@ mod tests {
         }
     }
 
-    fn sample_release(
-        now: SystemTime,
-        offset_hours: u64,
-        title: &str,
-        id: MovieId,
-    ) -> DigitalRelease {
+    fn sample_release(now: NaiveDate, title: &str, id: u64) -> DigitalRelease {
         DigitalRelease {
             id,
             title: title.to_string(),
-            release_time: now - Duration::from_secs(offset_hours * 3600),
-            display_date: "2024-01-01".to_string(),
+            event_date: now,
             locale: "ru".to_string(),
+            kind: ReleaseKind::Movie,
+            vote_average: Some(7.5),
+            vote_count: Some(100),
+            event_key: format!("movie:{id}"),
         }
     }
 
@@ -204,10 +267,14 @@ mod tests {
     #[test]
     fn releases_sorted_by_time_and_marked() {
         let config = test_config();
-        let now = SystemTime::now();
+        let now = NaiveDate::from_ymd_opt(2024, 1, 5).expect("валидная дата");
         let releases = vec![
-            sample_release(now, 50, "Далекий релиз", 1),
-            sample_release(now, 2, "Свежий релиз", 2),
+            sample_release(
+                NaiveDate::from_ymd_opt(2024, 1, 1).expect("валидная дата"),
+                "Далекий релиз",
+                1,
+            ),
+            sample_release(now, "Свежий релиз", 2),
         ];
 
         let messages = build_messages(&releases, &config);
@@ -217,6 +284,30 @@ mod tests {
         assert!(lines[0].starts_with("🔥"));
         assert!(lines[1].starts_with("🔥"));
         assert!(lines[0].contains("Свежий релиз"));
+    }
+
+    #[test]
+    fn tv_release_format_is_correct() {
+        let config = test_config();
+        let date = NaiveDate::from_ymd_opt(2024, 6, 1).expect("валидная дата");
+        let release = DigitalRelease {
+            id: 10,
+            title: "Сериал".to_string(),
+            event_date: date,
+            locale: "ru".to_string(),
+            kind: ReleaseKind::TvSeason { season_number: 2 },
+            vote_average: None,
+            vote_count: None,
+            event_key: "tv:10:season:2".to_string(),
+        };
+
+        let messages = build_messages(&[release], &config);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .text
+                .contains("📺 Новый сезон: Сериал — сезон 2")
+        );
     }
 
     #[test]

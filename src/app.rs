@@ -56,15 +56,15 @@ impl ReleaseDispatcher for NoopDispatcher {
 }
 
 pub fn release_window(now: DateTime<Utc>) -> ReleaseWindow {
-    let start = now - Duration::hours(48) - Duration::minutes(5);
+    let start = now - Duration::days(7);
     ReleaseWindow { start, end: now }
 }
 
 pub async fn fetch_releases(
-    history: &mut SentHistory<GitHubArtifactsClient>,
+    _history: &mut SentHistory<GitHubArtifactsClient>,
 ) -> Result<Vec<MovieRelease>, AppError> {
     let tmdb_api_key = required_env("TMDB_API_KEY")?;
-    let tmdb_client = TmdbClient::new(tmdb_api_key, history.iter().copied());
+    let tmdb_client = TmdbClient::new(tmdb_api_key);
 
     let now = Utc::now();
     let window = release_window(now);
@@ -173,21 +173,20 @@ mod tests {
             digital_release_date: release_date,
             original_language: "en".to_string(),
             popularity: 0.0,
+            vote_average: None,
+            vote_count: None,
             homepage: None,
             watch_providers: Vec::new(),
         }
     }
 
     #[test]
-    fn release_window_covers_48h_with_overlap() {
+    fn release_window_covers_last_week() {
         let now = Utc::now();
         let window = release_window(now);
 
         assert_eq!(window.end, now);
-        assert_eq!(
-            window.start,
-            now - Duration::hours(48) - Duration::minutes(5)
-        );
+        assert_eq!(window.start, now - Duration::days(7));
     }
 
     #[test]

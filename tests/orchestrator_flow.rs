@@ -3,9 +3,9 @@ use chrono::{NaiveDate, Utc};
 use movie_notifier_bot::config::{ChatConfig, TelegramConfig};
 use movie_notifier_bot::github::artifacts::{ArtifactError, ArtifactStore};
 use movie_notifier_bot::orchestrator::{
-    BoxError, MessageDispatcher, Orchestrator, ReleaseProvider,
+    BoxError, MessageDispatcher, Orchestrator, ReleaseBatch, ReleaseProvider,
 };
-use movie_notifier_bot::state::{MovieId, SentHistory};
+use movie_notifier_bot::state::{SentEventHistory, SentHistory};
 use movie_notifier_bot::tmdb::{MovieRelease, ReleaseWindow};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -42,16 +42,14 @@ impl ArtifactStore for MemoryStore {
 
 #[derive(Clone)]
 struct StubProvider {
-    releases: Vec<MovieRelease>,
-    preloaded: Arc<Mutex<Vec<MovieId>>>,
+    batch: ReleaseBatch,
     last_window: Arc<Mutex<Option<ReleaseWindow>>>,
 }
 
 impl StubProvider {
-    fn new(releases: Vec<MovieRelease>) -> Self {
+    fn new(batch: ReleaseBatch) -> Self {
         Self {
-            releases,
-            preloaded: Arc::new(Mutex::new(Vec::new())),
+            batch,
             last_window: Arc::new(Mutex::new(None)),
         }
     }
@@ -59,25 +57,12 @@ impl StubProvider {
 
 #[async_trait]
 impl ReleaseProvider for StubProvider {
-    async fn fetch_releases(
-        &mut self,
-        window: ReleaseWindow,
-    ) -> Result<Vec<MovieRelease>, BoxError> {
+    async fn fetch_releases(&self, window: ReleaseWindow) -> Result<ReleaseBatch, BoxError> {
         self.last_window
             .lock()
             .expect("блокировка доступна")
             .replace(window);
-        Ok(self.releases.clone())
-    }
-
-    fn preload_history<I>(&mut self, ids: I)
-    where
-        I: IntoIterator<Item = MovieId>,
-    {
-        self.preloaded
-            .lock()
-            .expect("блокировка доступна")
-            .extend(ids);
+        Ok(self.batch.clone())
     }
 }
 
@@ -106,6 +91,8 @@ fn sample_release(id: u64, title: &str) -> MovieRelease {
         digital_release_date: release_date,
         original_language: "ru".to_string(),
         popularity: 10.0,
+        vote_average: Some(7.2),
+        vote_count: Some(120),
         homepage: Some("https://example.org".to_string()),
         watch_providers: vec!["Kinopoisk".to_string()],
     }
@@ -114,17 +101,23 @@ fn sample_release(id: u64, title: &str) -> MovieRelease {
 #[tokio::test]
 async fn orchestrator_runs_full_cycle() {
     let dir = tempdir().expect("временная директория создаётся");
-    let file_path = dir.path().join("history.txt");
-    std::fs::write(&file_path, b"1\n").expect("история должна записываться");
+    let movie_file_path = dir.path().join("history.txt");
+    let tv_file_path = dir.path().join("tv_history.txt");
+    std::fs::write(&movie_file_path, b"1\n").expect("история должна записываться");
 
     let store = MemoryStore::default();
-    let history = SentHistory::with_store(&file_path, "artifact", store.clone());
+    let history = SentHistory::with_store(&movie_file_path, "artifact", store.clone());
+    let tv_history = SentEventHistory::with_store(&tv_file_path, "tv-artifact", store.clone());
 
     let releases = vec![
         sample_release(1, "Дубликат"),
         sample_release(2, "Новый релиз"),
     ];
-    let provider = StubProvider::new(releases);
+    let batch = ReleaseBatch {
+        movies: releases,
+        tv_events: Vec::new(),
+    };
+    let provider = StubProvider::new(batch);
     let dispatcher = StubDispatcher::default();
     let telegram_config = TelegramConfig {
         chats: vec![ChatConfig {
@@ -135,6 +128,7 @@ async fn orchestrator_runs_full_cycle() {
 
     let mut orchestrator = Orchestrator::new(
         history,
+        tv_history,
         provider.clone(),
         dispatcher.clone(),
         telegram_config,
@@ -148,16 +142,12 @@ async fn orchestrator_runs_full_cycle() {
 
     assert_eq!(summary.fetched, 2);
     assert_eq!(summary.new_releases, 1);
+    assert_eq!(summary.sent_releases, 1);
     assert_eq!(summary.duplicates, 1);
     assert_eq!(summary.messages_sent, 1);
-    assert_eq!(summary.history_appended, 1);
-
-    let preloaded = provider
-        .preloaded
-        .lock()
-        .expect("блокировка доступна")
-        .clone();
-    assert_eq!(preloaded, vec![1]);
+    assert_eq!(summary.movie_history_appended, 1);
+    assert_eq!(summary.tv_history_appended, 0);
+    assert_eq!(summary.truncated, 0);
 
     let window = provider
         .last_window
@@ -169,7 +159,7 @@ async fn orchestrator_runs_full_cycle() {
     assert_eq!(window.end.timestamp(), now.timestamp());
     assert_eq!(
         window.start.timestamp(),
-        (now - chrono::Duration::hours(48) - chrono::Duration::minutes(5)).timestamp()
+        (now - chrono::Duration::days(7)).timestamp()
     );
 
     let sent = dispatcher.sent.lock().expect("блокировка доступна").clone();
@@ -177,7 +167,8 @@ async fn orchestrator_runs_full_cycle() {
     assert_eq!(sent[0].0, 99);
     assert!(sent[0].1[0].contains("Новый релиз"));
 
-    let saved = std::fs::read_to_string(&file_path).expect("файл истории должен существовать");
+    let saved =
+        std::fs::read_to_string(&movie_file_path).expect("файл истории должен существовать");
     assert!(saved.contains('2'));
 
     let uploads = store.uploads.lock().expect("блокировка доступна");

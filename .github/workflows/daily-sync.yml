@@ -22,15 +22,47 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
+      - name: Восстановление истории фильмов
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state
+
+      - name: Восстановление истории сериалов
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state
+
       - name: Сборка и запуск бота
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
+          TV_HISTORY_FILE_PATH: state/sent_tv_events.txt
+          TV_HISTORY_ARTIFACT_NAME: sent-tv-events
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           cargo run --release
+
+      - name: Публикация истории фильмов
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state/sent_movie_ids.txt
+          overwrite: true
+
+      - name: Публикация истории сериалов
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state/sent_tv_events.txt
+          overwrite: true
 
       - name: summarize_run
         if: always()

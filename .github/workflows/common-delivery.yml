@@ -50,12 +50,28 @@ jobs:
       - name: Подготовка окружения Rust
         uses: ./.github/actions/setup-rust
 
+      - name: Восстановление истории фильмов
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state
+
+      - name: Восстановление истории сериалов
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state
+
       - name: Подготовка параметров истории для dev
         id: dev-history
         if: inputs.send_dev == true
         run: |
           echo "file=state/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
           echo "artifact=sent-movie-ids" >> "$GITHUB_OUTPUT"
+          echo "tv_file=state/sent_tv_events.txt" >> "$GITHUB_OUTPUT"
+          echo "tv_artifact=sent-tv-events" >> "$GITHUB_OUTPUT"
 
       - name: Отправка уведомлений в dev-чат
         if: inputs.send_dev == true
@@ -65,6 +81,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.dev-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.dev-history.outputs.artifact }}
+          TV_HISTORY_FILE_PATH: ${{ steps.dev-history.outputs.tv_file }}
+          TV_HISTORY_ARTIFACT_NAME: ${{ steps.dev-history.outputs.tv_artifact }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: cargo run --quiet --release
@@ -75,6 +93,8 @@ jobs:
         run: |
           echo "file=state/sent_movie_ids.txt" >> "$GITHUB_OUTPUT"
           echo "artifact=sent-movie-ids" >> "$GITHUB_OUTPUT"
+          echo "tv_file=state/sent_tv_events.txt" >> "$GITHUB_OUTPUT"
+          echo "tv_artifact=sent-tv-events" >> "$GITHUB_OUTPUT"
 
       - name: Отправка уведомлений в основной чат
         if: inputs.send_main == true
@@ -84,6 +104,24 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
           HISTORY_FILE_PATH: ${{ steps.prod-history.outputs.file }}
           HISTORY_ARTIFACT_NAME: ${{ steps.prod-history.outputs.artifact }}
+          TV_HISTORY_FILE_PATH: ${{ steps.prod-history.outputs.tv_file }}
+          TV_HISTORY_ARTIFACT_NAME: ${{ steps.prod-history.outputs.tv_artifact }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: cargo run --quiet --release
+
+      - name: Публикация истории фильмов
+        if: success() && (inputs.send_dev == true || inputs.send_main == true)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-movie-ids
+          path: state/sent_movie_ids.txt
+          overwrite: true
+
+      - name: Публикация истории сериалов
+        if: success() && (inputs.send_dev == true || inputs.send_main == true)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sent-tv-events
+          path: state/sent_tv_events.txt
+          overwrite: true

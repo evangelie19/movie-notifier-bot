@@ -8,7 +8,7 @@ use thiserror::Error;
 use movie_notifier_bot::config::{ChatConfig, TelegramConfig};
 use movie_notifier_bot::github::artifacts::{GitHubArtifactsClient, GitHubCredentials};
 use movie_notifier_bot::orchestrator::{Orchestrator, OrchestratorError};
-use movie_notifier_bot::state::{SentHistory, StateError};
+use movie_notifier_bot::state::{SentEventHistory, SentHistory, StateError};
 use movie_notifier_bot::telegram::{
     ConfigError as TelegramConfigError, TelegramDispatcher, TelegramError,
 };
@@ -16,6 +16,8 @@ use movie_notifier_bot::tmdb::{TmdbClient, TmdbError};
 
 const DEFAULT_HISTORY_FILE_PATH: &str = "state/sent_movie_ids.txt";
 const DEFAULT_HISTORY_ARTIFACT_NAME: &str = "sent-movie-ids";
+const DEFAULT_TV_HISTORY_FILE_PATH: &str = "state/sent_tv_events.txt";
+const DEFAULT_TV_HISTORY_ARTIFACT_NAME: &str = "sent-tv-events";
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -85,7 +87,9 @@ impl AppConfig {
     ) -> Result<Orchestrator<GitHubArtifactsClient, TmdbClient, TelegramDispatcher>, AppError> {
         let creds = github_credentials_from_env(&self.github_repo, &self.github_token)?;
         let (history_file, history_artifact) = history_config_from_env();
-        let history = SentHistory::new(history_file, history_artifact, creds)?;
+        let (tv_history_file, tv_history_artifact) = tv_history_config_from_env();
+        let history = SentHistory::new(history_file, history_artifact, creds.clone())?;
+        let tv_history = SentEventHistory::new(tv_history_file, tv_history_artifact, creds)?;
 
         let telegram_config = TelegramConfig {
             chats: self
@@ -99,11 +103,12 @@ impl AppConfig {
                 .collect(),
         };
 
-        let tmdb_client = TmdbClient::new(self.tmdb_api_key, std::iter::empty());
+        let tmdb_client = TmdbClient::new(self.tmdb_api_key);
         let dispatcher = TelegramDispatcher::new(self.telegram_token, self.telegram_chats.clone());
 
         Ok(Orchestrator::new(
             history,
+            tv_history,
             tmdb_client,
             dispatcher,
             telegram_config,
@@ -124,6 +129,14 @@ fn history_config_from_env() -> (String, String) {
         env::var("HISTORY_FILE_PATH").unwrap_or_else(|_| DEFAULT_HISTORY_FILE_PATH.to_owned());
     let artifact_name = env::var("HISTORY_ARTIFACT_NAME")
         .unwrap_or_else(|_| DEFAULT_HISTORY_ARTIFACT_NAME.to_owned());
+    (file_path, artifact_name)
+}
+
+fn tv_history_config_from_env() -> (String, String) {
+    let file_path = env::var("TV_HISTORY_FILE_PATH")
+        .unwrap_or_else(|_| DEFAULT_TV_HISTORY_FILE_PATH.to_owned());
+    let artifact_name = env::var("TV_HISTORY_ARTIFACT_NAME")
+        .unwrap_or_else(|_| DEFAULT_TV_HISTORY_ARTIFACT_NAME.to_owned());
     (file_path, artifact_name)
 }
 
