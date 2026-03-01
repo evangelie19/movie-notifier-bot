@@ -15,7 +15,7 @@ use tracing::info;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
-const SORTING: &str = "primary_release_date.asc";
+const SORTING: &str = "release_date.asc";
 const PRIORITY_DIGITAL_REGIONS: [&str; 8] = ["RU", "US", "GB", "DE", "FR", "IT", "ES", "NL"];
 const RELEVANT_PRODUCTION_COUNTRIES: [&str; 23] = [
     "US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR", "RU", "NL", "SE", "NO", "DK", "FI",
@@ -173,7 +173,6 @@ impl TmdbClient {
 
         let mut releases = Vec::new();
         let mut skipped_missing_date = 0usize;
-        let mut skipped_history = 0usize;
         let mut skipped_missing_original_date = 0usize;
         let mut skipped_missing_digital_date = 0usize;
         let mut skipped_outside_window = 0usize;
@@ -183,11 +182,8 @@ impl TmdbClient {
         for movie in movies.into_iter() {
             if movie.release_date.is_empty() {
                 skipped_missing_date += 1;
-            if self.history.contains(&movie.id) {
-                skipped_history += 1;
                 continue;
             }
-
             let Some(original_release_date) =
                 parse_original_release_date(&movie.original_release_date)
             else {
@@ -246,7 +242,6 @@ impl TmdbClient {
             target: "tmdb",
             fetched = releases.len(),
             skipped_missing_date,
-            skipped_history,
             skipped_missing_original_date,
             skipped_missing_digital_date,
             skipped_outside_window,
@@ -698,8 +693,9 @@ fn discover_request(
             "with_release_type".to_string(),
             DIGITAL_RELEASE_TYPE.to_string(),
         ),
-        ("primary_release_date.gte".to_string(), start),
-        ("primary_release_date.lte".to_string(), end),
+        ("release_date.gte".to_string(), start),
+        ("release_date.lte".to_string(), end),
+        ("region".to_string(), "US".to_string()),
         ("include_adult".to_string(), "false".to_string()),
         ("page".to_string(), page.to_string()),
     ];
@@ -1243,8 +1239,11 @@ mod tests {
             .url()
             .query()
             .expect("query string should be present");
-        assert!(query.contains("primary_release_date.gte=2024-01-02"));
-        assert!(query.contains("primary_release_date.lte=2024-01-05"));
+        assert!(query.contains("sort_by=release_date.asc"));
+        assert!(query.contains("with_release_type=4"));
+        assert!(query.contains("release_date.gte=2024-01-02"));
+        assert!(query.contains("release_date.lte=2024-01-05"));
+        assert!(query.contains("region=US"));
     }
 
     #[test]
