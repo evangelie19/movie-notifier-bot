@@ -46,18 +46,14 @@ pub struct ChatPayload {
 pub struct TelegramMessage {
     pub chat_id: i64,
     pub text: String,
-    pub parse_mode: &'static str,
     pub disable_web_page_preview: bool,
 }
 
 impl TelegramMessage {
-    const PARSE_MODE: &'static str = "MarkdownV2";
-
     pub fn new(chat_id: i64, text: String) -> Self {
         Self {
             chat_id,
             text,
-            parse_mode: Self::PARSE_MODE,
             disable_web_page_preview: true,
         }
     }
@@ -147,18 +143,17 @@ pub fn build_messages(
             for release in payload.releases {
                 let line = match release.kind {
                     ReleaseKind::Movie => {
-                        let title = escape_markdown_v2(&release.title);
-                        let date =
-                            escape_markdown_v2(&release.event_date.format("%Y-%m-%d").to_string());
+                        let title = release.title;
+                        let date = release.event_date.format("%Y-%m-%d").to_string();
                         format!("🔥 {title} — {date}")
                     }
                     ReleaseKind::TvPremiere => {
-                        let title = escape_markdown_v2(&release.title);
+                        let title = release.title;
                         let year = release.event_date.year();
                         format!("📺 Премьера сериала: {title} ({year})")
                     }
                     ReleaseKind::TvSeason { season_number } => {
-                        let title = escape_markdown_v2(&release.title);
+                        let title = release.title;
                         format!("📺 Новый сезон: {title} — сезон {season_number}")
                     }
                 };
@@ -171,27 +166,12 @@ pub fn build_messages(
 }
 
 pub fn build_empty_messages(config: &TelegramConfig) -> Vec<TelegramMessage> {
-    let text = escape_markdown_v2("Новых релизов нет.");
+    let text = "Новых цифровых релизов нет.".to_string();
     config
         .chats
         .iter()
         .map(|chat| TelegramMessage::new(chat.chat_id, text.clone()))
         .collect()
-}
-
-pub fn escape_markdown_v2(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
-            | '{' | '}' | '.' | '!' | '\\' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
 }
 
 fn chunk_lines(
@@ -311,13 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn markdown_escape_is_correct() {
-        let source = "Спецсимволы _[]()<>#-=";
-        let escaped = escape_markdown_v2(source);
-        assert_eq!(
-            escaped, "Спецсимволы \\_\\[\\]\\(\\)<\\>\\#\\-\\=",
-            "Must escape Markdown V2 characters"
-        );
+    fn empty_message_is_plain_text_without_escaping() {
+        let config = test_config();
+        let messages = build_empty_messages(&config);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "Новых цифровых релизов нет.");
     }
 
     #[test]
