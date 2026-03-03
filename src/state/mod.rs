@@ -173,7 +173,7 @@ impl<C: ArtifactStore> SentHistory<C> {
     }
 }
 
-/// Хранилище отправленных событий сериалов (ключи вида tv:<id>:premiere).
+/// Хранилище отправленных событий сериалов (ключи вида `tv:<id>:premiere`).
 pub struct SentEventHistory<C: ArtifactStore = GitHubArtifactsClient> {
     file_path: PathBuf,
     artifact_name: String,
