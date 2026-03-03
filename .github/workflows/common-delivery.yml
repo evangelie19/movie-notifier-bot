@@ -64,6 +64,26 @@ jobs:
           name: sent-tv-events
           path: state
 
+      - name: Инициализация state-артефактов
+        run: |
+          mkdir -p state
+
+          missing_state=false
+          if [ ! -f state/sent_movie_ids.txt ]; then
+            : > state/sent_movie_ids.txt
+            missing_state=true
+          fi
+
+          if [ ! -f state/sent_tv_events.txt ]; then
+            : > state/sent_tv_events.txt
+            missing_state=true
+          fi
+
+          if [ "$missing_state" = true ]; then
+            echo "state artifacts missing, initialized empty state"
+            echo "* state artifacts missing, initialized empty state" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Подготовка параметров истории для dev
         id: dev-history
         if: inputs.send_dev == true
@@ -111,7 +131,7 @@ jobs:
         run: cargo run --quiet --release
 
       - name: Публикация истории фильмов
-        if: success() && (inputs.send_dev == true || inputs.send_main == true)
+        if: always() && (inputs.send_dev == true || inputs.send_main == true)
         uses: actions/upload-artifact@v4
         with:
           name: sent-movie-ids
@@ -119,7 +139,7 @@ jobs:
           overwrite: true
 
       - name: Публикация истории сериалов
-        if: success() && (inputs.send_dev == true || inputs.send_main == true)
+        if: always() && (inputs.send_dev == true || inputs.send_main == true)
         uses: actions/upload-artifact@v4
         with:
           name: sent-tv-events

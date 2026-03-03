@@ -36,6 +36,26 @@ jobs:
           name: sent-tv-events
           path: state
 
+      - name: Инициализация state-артефактов
+        run: |
+          mkdir -p state
+
+          missing_state=false
+          if [ ! -f state/sent_movie_ids.txt ]; then
+            : > state/sent_movie_ids.txt
+            missing_state=true
+          fi
+
+          if [ ! -f state/sent_tv_events.txt ]; then
+            : > state/sent_tv_events.txt
+            missing_state=true
+          fi
+
+          if [ "$missing_state" = true ]; then
+            echo "state artifacts missing, initialized empty state"
+            echo "* state artifacts missing, initialized empty state" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Сборка и запуск бота
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
@@ -49,7 +69,7 @@ jobs:
           cargo run --release
 
       - name: Публикация истории фильмов
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sent-movie-ids
@@ -57,7 +77,7 @@ jobs:
           overwrite: true
 
       - name: Публикация истории сериалов
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sent-tv-events
