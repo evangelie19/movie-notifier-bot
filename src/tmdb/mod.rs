@@ -3,6 +3,7 @@
 // предупреждения о неиспользуемых элементах до его подключения.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::env;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
@@ -15,8 +16,10 @@ use tracing::info;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const DIGITAL_RELEASE_TYPE: &str = "4";
-const SORTING: &str = "release_date.asc";
-const PRIORITY_DIGITAL_REGIONS: [&str; 8] = ["RU", "US", "GB", "DE", "FR", "IT", "ES", "NL"];
+const SORTING: &str = "popularity.desc";
+const DEFAULT_PRIORITY_REGIONS: [&str; 6] = ["US", "GB", "CA", "AU", "DE", "FR"];
+const MAX_MOVIES_PER_REGION: usize = 40;
+const MAX_DISCOVER_RESULTS_TOTAL: usize = 120;
 const RELEVANT_PRODUCTION_COUNTRIES: [&str; 23] = [
     "US", "GB", "CA", "AU", "FR", "DE", "IT", "ES", "JP", "KR", "RU", "NL", "SE", "NO", "DK", "FI",
     "BE", "IE", "CH", "PL", "CZ", "AT", "HU",
@@ -31,6 +34,7 @@ const MAX_DISCOVER_PAGES: u32 = 5;
 const MIN_VOTE_COUNT: u32 = 20;
 const MIN_VOTE_AVERAGE: f64 = 6.8;
 const MIN_POPULARITY: f64 = 0.0;
+const PRIORITY_REGIONS_ENV: &str = "TMDB_PRIORITY_REGIONS";
 
 #[derive(Debug, Error)]
 pub enum TmdbError {
@@ -99,6 +103,7 @@ impl TvEvent {
 pub struct TmdbClient {
     http: Client,
     api_key: String,
+    priority_regions: Vec<String>,
 }
 
 impl TmdbClient {
@@ -114,6 +119,7 @@ impl TmdbClient {
         Self {
             http,
             api_key: api_key.into(),
+            priority_regions: resolve_priority_regions(),
         }
     }
 
@@ -131,45 +137,42 @@ impl TmdbClient {
         let start = format_discover_date(window.start);
         let end = format_discover_date(window.end);
 
-        let request_factory = |page| {
-            let client = client.clone();
-            let url = url.clone();
-            let api_key = api_key.clone();
-            let start = start.clone();
-            let end = end.clone();
+        let mut regional_candidates = HashMap::new();
+        let mut movies = Vec::new();
 
-            move || {
-                discover_request(
+        for region in &self.priority_regions {
+            let region_movies = self
+                .fetch_discover_movies_for_region(
                     client.clone(),
                     url.clone(),
                     api_key.clone(),
                     start.clone(),
                     end.clone(),
-                    page,
+                    region,
                 )
-            }
-        };
+                .await?;
+            regional_candidates.insert(region.clone(), region_movies.len());
 
-        let mut response: DiscoverResponse = self.fetch_json(request_factory(1)).await?;
-        let mut movies = response.results;
-        let total_pages = limit_total_pages(response.total_pages);
+            movies.extend(region_movies.into_iter().take(MAX_MOVIES_PER_REGION));
+        }
+
+        let before_dedup = movies.len();
+        let mut seen_ids = HashSet::new();
+        movies.retain(|movie| seen_ids.insert(movie.id));
+        let after_dedup = movies.len();
+        if movies.len() > MAX_DISCOVER_RESULTS_TOTAL {
+            movies.truncate(MAX_DISCOVER_RESULTS_TOTAL);
+        }
 
         info!(
             target: "tmdb",
-            start = %start,
-            end = %end,
-            total_pages = response.total_pages,
-            total_results = response.total_results,
-            limited_pages = total_pages,
-            "Получен ответ TMDB discover"
+            regions = ?self.priority_regions,
+            regional_candidates = ?regional_candidates,
+            before_dedup,
+            after_dedup,
+            limited_total = movies.len(),
+            "Собраны кандидаты discover по приоритетным регионам"
         );
-
-        if total_pages > 1 {
-            for page in 2..=total_pages {
-                response = self.fetch_json(request_factory(page)).await?;
-                movies.extend(response.results);
-            }
-        }
 
         let mut releases = Vec::new();
         let mut skipped_missing_date = 0usize;
@@ -467,7 +470,62 @@ impl TmdbClient {
             move || release_dates_request(client.clone(), url.clone(), api_key.clone());
 
         let payload: ReleaseDatesResponse = self.fetch_json(request_factory).await?;
-        select_digital_release_date(&payload.results, today)
+        select_digital_release_date(&payload.results, today, &self.priority_regions)
+    }
+
+    async fn fetch_discover_movies_for_region(
+        &self,
+        client: Client,
+        url: String,
+        api_key: String,
+        start: String,
+        end: String,
+        region: &str,
+    ) -> Result<Vec<DiscoverMovie>, TmdbError> {
+        let request_factory = |page| {
+            let client = client.clone();
+            let url = url.clone();
+            let api_key = api_key.clone();
+            let start = start.clone();
+            let end = end.clone();
+            let region = region.to_string();
+
+            move || {
+                discover_request(
+                    client.clone(),
+                    url.clone(),
+                    api_key.clone(),
+                    start.clone(),
+                    end.clone(),
+                    page,
+                    region.clone(),
+                )
+            }
+        };
+
+        let mut response: DiscoverResponse = self.fetch_json(request_factory(1)).await?;
+        let mut movies = response.results;
+        let total_pages = limit_total_pages(response.total_pages);
+
+        info!(
+            target: "tmdb",
+            region,
+            start = %start,
+            end = %end,
+            total_pages = response.total_pages,
+            total_results = response.total_results,
+            limited_pages = total_pages,
+            "Получен ответ TMDB discover"
+        );
+
+        if total_pages > 1 {
+            for page in 2..=total_pages {
+                response = self.fetch_json(request_factory(page)).await?;
+                movies.extend(response.results);
+            }
+        }
+
+        Ok(movies)
     }
 
     async fn fetch_json<T, F>(&self, request_factory: F) -> Result<T, TmdbError>
@@ -685,6 +743,7 @@ fn discover_request(
     start: String,
     end: String,
     page: u32,
+    region: String,
 ) -> RequestBuilder {
     let query = vec![
         ("api_key".to_string(), api_key),
@@ -695,7 +754,8 @@ fn discover_request(
         ),
         ("release_date.gte".to_string(), start),
         ("release_date.lte".to_string(), end),
-        ("region".to_string(), "US".to_string()),
+        ("region".to_string(), region),
+        ("vote_count.gte".to_string(), MIN_VOTE_COUNT.to_string()),
         ("include_adult".to_string(), "false".to_string()),
         ("page".to_string(), page.to_string()),
     ];
@@ -776,6 +836,7 @@ fn collect_providers(regions: HashMap<String, WatchProviderRegion>) -> Vec<Strin
 fn select_digital_release_date(
     results: &[ReleaseDatesRegion],
     today: NaiveDate,
+    priority_regions: &[String],
 ) -> Result<Option<NaiveDate>, TmdbError> {
     let mut by_region: HashMap<String, Vec<NaiveDate>> = HashMap::new();
 
@@ -796,7 +857,7 @@ fn select_digital_release_date(
         }
     }
 
-    for region in PRIORITY_DIGITAL_REGIONS {
+    for region in priority_regions {
         if let Some(dates) = by_region.get(region) {
             return Ok(select_preferred_date(dates.iter().copied(), today));
         }
@@ -806,6 +867,40 @@ fn select_digital_release_date(
         by_region.into_values().flatten(),
         today,
     ))
+}
+
+fn resolve_priority_regions() -> Vec<String> {
+    resolve_priority_regions_from(env::var(PRIORITY_REGIONS_ENV).ok().as_deref())
+}
+
+fn resolve_priority_regions_from(raw: Option<&str>) -> Vec<String> {
+    let from_env = raw.map(parse_priority_regions);
+
+    from_env
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| {
+            DEFAULT_PRIORITY_REGIONS
+                .iter()
+                .map(|region| (*region).to_string())
+                .collect()
+        })
+}
+
+fn parse_priority_regions(raw: &str) -> Vec<String> {
+    let mut unique = HashSet::new();
+    raw.split(',')
+        .filter_map(|region| {
+            let normalized = region.trim().to_ascii_uppercase();
+            if normalized.len() == 2
+                && normalized.chars().all(|ch| ch.is_ascii_alphabetic())
+                && unique.insert(normalized.clone())
+            {
+                return Some(normalized);
+            }
+
+            None
+        })
+        .collect()
 }
 
 fn select_preferred_date<I>(dates: I, today: NaiveDate) -> Option<NaiveDate>
@@ -947,6 +1042,13 @@ mod tests {
             region: region.to_string(),
             release_dates: dates,
         }
+    }
+
+    fn default_priority_regions() -> Vec<String> {
+        DEFAULT_PRIORITY_REGIONS
+            .iter()
+            .map(|region| (*region).to_string())
+            .collect()
     }
 
     #[test]
@@ -1106,7 +1208,9 @@ mod tests {
             ),
         ];
 
-        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
+        let selected =
+            select_digital_release_date(&results, today, &["RU".to_string(), "US".to_string()])
+                .expect("дата выбирается");
         assert_eq!(
             selected,
             Some(NaiveDate::from_ymd_opt(2024, 2, 5).expect("валидная дата"))
@@ -1121,7 +1225,8 @@ mod tests {
             make_region("CA", vec![make_release_entry("2024-01-05", 4)]),
         ];
 
-        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today, &default_priority_regions())
+            .expect("дата выбирается");
         assert_eq!(
             selected,
             Some(NaiveDate::from_ymd_opt(2024, 1, 5).expect("валидная дата"))
@@ -1139,7 +1244,8 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today, &default_priority_regions())
+            .expect("дата выбирается");
         assert_eq!(
             selected,
             Some(NaiveDate::from_ymd_opt(2024, 1, 4).expect("валидная дата"))
@@ -1187,7 +1293,8 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today, &default_priority_regions())
+            .expect("дата выбирается");
         assert_eq!(selected, Some(past));
     }
 
@@ -1204,7 +1311,8 @@ mod tests {
             ],
         )];
 
-        let selected = select_digital_release_date(&results, today).expect("дата выбирается");
+        let selected = select_digital_release_date(&results, today, &default_priority_regions())
+            .expect("дата выбирается");
         assert_eq!(selected, Some(first_future));
     }
 
@@ -1231,6 +1339,7 @@ mod tests {
             "2024-01-02".to_string(),
             "2024-01-05".to_string(),
             1,
+            "US".to_string(),
         )
         .build()
         .expect("request build");
@@ -1239,11 +1348,12 @@ mod tests {
             .url()
             .query()
             .expect("query string should be present");
-        assert!(query.contains("sort_by=release_date.asc"));
+        assert!(query.contains("sort_by=popularity.desc"));
         assert!(query.contains("with_release_type=4"));
         assert!(query.contains("release_date.gte=2024-01-02"));
         assert!(query.contains("release_date.lte=2024-01-05"));
         assert!(query.contains("region=US"));
+        assert!(query.contains("vote_count.gte=20"));
     }
 
     #[test]
@@ -1299,6 +1409,22 @@ mod tests {
             parsed,
             NaiveDate::from_ymd_opt(2024, 2, 10).expect("валидная дата")
         );
+    }
+
+    #[test]
+    fn parse_priority_regions_normalizes_and_deduplicates() {
+        let parsed = parse_priority_regions("us, gb,US,xx1, ,fr");
+
+        assert_eq!(parsed, vec!["US", "GB", "FR"]);
+    }
+
+    #[test]
+    fn resolve_priority_regions_uses_defaults_for_empty_env() {
+        let parsed = parse_priority_regions(" ,123");
+
+        assert!(parsed.is_empty());
+        let defaults = default_priority_regions();
+        assert_eq!(defaults, resolve_priority_regions_from(None));
     }
 
     #[test]
