@@ -165,15 +165,6 @@ pub fn build_messages(
         .collect()
 }
 
-pub fn build_empty_messages(config: &TelegramConfig) -> Vec<TelegramMessage> {
-    let text = "Новых цифровых релизов нет.".to_string();
-    config
-        .chats
-        .iter()
-        .map(|chat| TelegramMessage::new(chat.chat_id, text.clone()))
-        .collect()
-}
-
 fn chunk_lines(
     chat_id: i64,
     header: &str,
@@ -288,15 +279,6 @@ mod tests {
                 .text
                 .contains("📺 Новый сезон: Сериал — сезон 2")
         );
-    }
-
-    #[test]
-    fn empty_message_is_plain_text_without_escaping() {
-        let config = test_config();
-        let messages = build_empty_messages(&config);
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].text, "Новых цифровых релизов нет.");
     }
 
     #[test]

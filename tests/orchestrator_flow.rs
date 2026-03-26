@@ -177,3 +177,53 @@ async fn orchestrator_runs_full_cycle() {
     assert_eq!(uploads[0].1, "history.txt");
     assert!(String::from_utf8_lossy(&uploads[0].2).contains('2'));
 }
+
+#[tokio::test]
+async fn orchestrator_skips_dispatch_when_no_new_releases() {
+    let dir = tempdir().expect("временная директория создаётся");
+    let movie_file_path = dir.path().join("history.txt");
+    let tv_file_path = dir.path().join("tv_history.txt");
+
+    let store = MemoryStore::default();
+    let history = SentHistory::with_store(&movie_file_path, "artifact", store);
+    let tv_history =
+        SentEventHistory::with_store(&tv_file_path, "tv-artifact", MemoryStore::default());
+
+    let provider = StubProvider::new(ReleaseBatch {
+        movies: Vec::new(),
+        tv_events: Vec::new(),
+    });
+    let dispatcher = StubDispatcher::default();
+    let telegram_config = TelegramConfig {
+        chats: vec![ChatConfig {
+            chat_id: 99,
+            locales: vec!["ru".to_string()],
+        }],
+    };
+
+    let mut orchestrator = Orchestrator::new(
+        history,
+        tv_history,
+        provider,
+        dispatcher.clone(),
+        telegram_config,
+    );
+
+    let summary = orchestrator
+        .run(Utc::now())
+        .await
+        .expect("оркестратор должен завершиться успешно");
+
+    assert_eq!(summary.fetched, 0);
+    assert_eq!(summary.new_releases, 0);
+    assert_eq!(summary.sent_releases, 0);
+    assert_eq!(summary.messages_sent, 0);
+    assert!(
+        dispatcher
+            .sent
+            .lock()
+            .expect("блокировка доступна")
+            .is_empty(),
+        "диспетчер не должен вызываться при пустом списке релизов"
+    );
+}
