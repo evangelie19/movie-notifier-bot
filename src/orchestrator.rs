@@ -4,9 +4,7 @@ use thiserror::Error;
 use tracing::info;
 
 use crate::config::TelegramConfig;
-use crate::formatter::{
-    DigitalRelease, ReleaseKind, build_empty_messages, build_messages, sort_releases_by_priority,
-};
+use crate::formatter::{DigitalRelease, ReleaseKind, build_messages, sort_releases_by_priority};
 use crate::state::{SentEventHistory, SentHistory, StateError};
 use crate::telegram::TelegramDispatcher;
 use crate::tmdb::{MovieRelease, ReleaseWindow, TmdbClient, TvEvent, TvEventKind};
@@ -113,20 +111,12 @@ where
         );
 
         if combined.is_empty() {
-            let empty_messages = build_empty_messages(&self.telegram_config);
-            let messages_sent = empty_messages.len();
-            for message in empty_messages {
-                self.dispatcher
-                    .send_messages(message.chat_id, vec![message.text])
-                    .await
-                    .map_err(OrchestratorError::Dispatch)?;
-            }
             return Ok(RunSummary {
                 fetched,
                 new_releases: candidate_count,
                 sent_releases: 0,
                 duplicates,
-                messages_sent,
+                messages_sent: 0,
                 movie_history_appended: 0,
                 tv_history_appended: 0,
                 truncated: candidate_count,

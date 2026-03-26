@@ -31,9 +31,11 @@ const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(30 * 60),
 ];
 const MAX_DISCOVER_PAGES: u32 = 5;
-const MIN_VOTE_COUNT: u32 = 20;
-const MIN_VOTE_AVERAGE: f64 = 6.8;
+const MIN_VOTE_COUNT: u32 = 10;
+const MIN_VOTE_AVERAGE: f64 = 6.3;
 const MIN_POPULARITY: f64 = 0.0;
+const MOVIE_DISCOVER_WINDOW_DAYS: i64 = 14;
+const DISCOVER_WINDOW_EXPAND_THRESHOLD_DAYS: i64 = 7;
 const PRIORITY_REGIONS_ENV: &str = "TMDB_PRIORITY_REGIONS";
 
 #[derive(Debug, Error)]
@@ -130,12 +132,13 @@ impl TmdbClient {
         if window.start > window.end {
             return Err(TmdbError::InvalidWindow);
         }
+        let movie_window = movie_discover_window(window);
 
         let url = format!("{TMDB_BASE_URL}/discover/movie");
         let client = self.http.clone();
         let api_key = self.api_key.clone();
-        let start = format_discover_date(window.start);
-        let end = format_discover_date(window.end);
+        let start = format_discover_date(movie_window.start);
+        let end = format_discover_date(movie_window.end);
 
         let mut regional_candidates = HashMap::new();
         let mut movies = Vec::new();
@@ -167,6 +170,8 @@ impl TmdbClient {
         info!(
             target: "tmdb",
             regions = ?self.priority_regions,
+            discover_start = %start,
+            discover_end = %end,
             regional_candidates = ?regional_candidates,
             before_dedup,
             after_dedup,
@@ -174,13 +179,19 @@ impl TmdbClient {
             "Собраны кандидаты discover по приоритетным регионам"
         );
 
+        let raw_movies = movies.len();
         let mut releases = Vec::new();
         let mut skipped_missing_date = 0usize;
         let mut skipped_missing_original_date = 0usize;
         let mut skipped_missing_digital_date = 0usize;
         let mut skipped_outside_window = 0usize;
-        let mut skipped_irrelevant = 0usize;
         let mut skipped_old = 0usize;
+        let mut after_basic_filter = 0usize;
+        let mut skipped_by_imdb = 0usize;
+        let mut skipped_by_country = 0usize;
+        let mut skipped_by_genre = 0usize;
+        let mut skipped_by_quality = 0usize;
+        let mut skipped_by_runtime = 0usize;
         let current_year = window.end.date_naive().year();
         for movie in movies.into_iter() {
             if movie.release_date.is_empty() {
@@ -222,8 +233,26 @@ impl TmdbClient {
                 continue;
             }
 
-            if !is_relevant_release(&details) {
-                skipped_irrelevant += 1;
+            after_basic_filter += 1;
+            let verdict = movie_filter_verdict(&details);
+            if !verdict.has_imdb_id {
+                skipped_by_imdb += 1;
+                continue;
+            }
+            if !verdict.has_relevant_country {
+                skipped_by_country += 1;
+                continue;
+            }
+            if verdict.has_excluded_genre {
+                skipped_by_genre += 1;
+                continue;
+            }
+            if !verdict.passes_quality_filters {
+                skipped_by_quality += 1;
+                continue;
+            }
+            if !verdict.passes_runtime_filter {
+                skipped_by_runtime += 1;
                 continue;
             }
 
@@ -248,9 +277,20 @@ impl TmdbClient {
             skipped_missing_original_date,
             skipped_missing_digital_date,
             skipped_outside_window,
-            skipped_irrelevant,
             skipped_old,
             "Сформирован список цифровых релизов после фильтров"
+        );
+        info!(
+            target: "tmdb",
+            raw_movies,
+            after_basic_filter,
+            skipped_by_country,
+            skipped_by_genre,
+            skipped_by_quality,
+            skipped_by_runtime,
+            skipped_by_imdb,
+            final_movies = releases.len(),
+            "Диагностика фильтрации фильмов"
         );
 
         Ok(releases)
@@ -951,6 +991,18 @@ fn date_in_window(date: NaiveDate, window: ReleaseWindow) -> bool {
     date >= start && date <= end
 }
 
+fn movie_discover_window(window: ReleaseWindow) -> ReleaseWindow {
+    let days = (window.end.date_naive() - window.start.date_naive()).num_days();
+    if days <= DISCOVER_WINDOW_EXPAND_THRESHOLD_DAYS {
+        return ReleaseWindow {
+            start: window.end - chrono::Duration::days(MOVIE_DISCOVER_WINDOW_DAYS),
+            end: window.end,
+        };
+    }
+
+    window
+}
+
 fn limit_total_pages(total_pages: u32) -> u32 {
     total_pages.clamp(1, MAX_DISCOVER_PAGES)
 }
@@ -970,35 +1022,49 @@ fn passes_quality_filters(
 }
 
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
+    let verdict = movie_filter_verdict(details);
+
+    verdict.has_imdb_id
+        && verdict.has_relevant_country
+        && !verdict.has_excluded_genre
+        && verdict.passes_runtime_filter
+        && verdict.passes_quality_filters
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MovieFilterVerdict {
+    has_imdb_id: bool,
+    has_relevant_country: bool,
+    has_excluded_genre: bool,
+    passes_runtime_filter: bool,
+    passes_quality_filters: bool,
+}
+
+fn movie_filter_verdict(details: &MovieDetails) -> MovieFilterVerdict {
     let has_imdb_id = details
         .imdb_id
         .as_deref()
         .map(|id| !id.trim().is_empty())
         .unwrap_or(false);
-
     let has_relevant_country = details
         .production_countries
         .iter()
         .any(|country| RELEVANT_PRODUCTION_COUNTRIES.contains(&country.code.as_str()));
-
     let has_excluded_genre = details
         .genres
         .iter()
         .any(|genre| EXCLUDED_GENRES.contains(&genre.name.as_str()));
-
-    let has_required_runtime = details
-        .runtime
-        .map(|minutes| minutes >= 60)
-        .unwrap_or(false);
-
-    let meets_popularity_thresholds =
+    let passes_runtime_filter = details.runtime.is_none_or(|minutes| minutes >= 60);
+    let passes_quality_filters =
         passes_quality_filters(details.vote_average, details.vote_count, details.popularity);
 
-    has_imdb_id
-        && has_relevant_country
-        && !has_excluded_genre
-        && has_required_runtime
-        && meets_popularity_thresholds
+    MovieFilterVerdict {
+        has_imdb_id,
+        has_relevant_country,
+        has_excluded_genre,
+        passes_runtime_filter,
+        passes_quality_filters,
+    }
 }
 
 #[cfg(test)]
@@ -1081,7 +1147,7 @@ mod tests {
     #[test]
     fn release_with_low_vote_count_is_filtered_out() {
         let details = make_details(|details| {
-            details.vote_count = Some(10);
+            details.vote_count = Some(9);
         });
 
         assert!(!is_relevant_release(&details));
@@ -1186,12 +1252,12 @@ mod tests {
     }
 
     #[test]
-    fn release_without_runtime_is_filtered_out() {
+    fn release_without_runtime_is_not_filtered_out() {
         let details = make_details(|details| {
             details.runtime = None;
         });
 
-        assert!(!is_relevant_release(&details));
+        assert!(is_relevant_release(&details));
     }
 
     #[test]
@@ -1353,7 +1419,39 @@ mod tests {
         assert!(query.contains("release_date.gte=2024-01-02"));
         assert!(query.contains("release_date.lte=2024-01-05"));
         assert!(query.contains("region=US"));
-        assert!(query.contains("vote_count.gte=20"));
+        assert!(query.contains("vote_count.gte=10"));
+    }
+
+    #[test]
+    fn movie_discover_window_expands_week_to_two_weeks() {
+        let end = DateTime::parse_from_rfc3339("2026-03-20T12:00:00Z")
+            .expect("валидная дата")
+            .with_timezone(&Utc);
+        let input = ReleaseWindow {
+            start: end - chrono::Duration::days(7),
+            end,
+        };
+
+        let expanded = movie_discover_window(input);
+
+        assert_eq!(expanded.end, end);
+        assert_eq!(expanded.start, end - chrono::Duration::days(14));
+    }
+
+    #[test]
+    fn movie_discover_window_keeps_longer_ranges() {
+        let end = DateTime::parse_from_rfc3339("2026-03-20T12:00:00Z")
+            .expect("валидная дата")
+            .with_timezone(&Utc);
+        let input = ReleaseWindow {
+            start: end - chrono::Duration::days(14),
+            end,
+        };
+
+        let expanded = movie_discover_window(input);
+
+        assert_eq!(expanded.start, input.start);
+        assert_eq!(expanded.end, input.end);
     }
 
     #[test]
