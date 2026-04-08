@@ -36,6 +36,7 @@ const MIN_VOTE_AVERAGE: f64 = 6.3;
 const MIN_POPULARITY: f64 = 0.0;
 const MOVIE_DISCOVER_WINDOW_DAYS: i64 = 14;
 const DISCOVER_WINDOW_EXPAND_THRESHOLD_DAYS: i64 = 7;
+const MOVIE_DEBUG_CANDIDATES_LIMIT: usize = 25;
 const PRIORITY_REGIONS_ENV: &str = "TMDB_PRIORITY_REGIONS";
 
 #[derive(Debug, Error)]
@@ -141,6 +142,7 @@ impl TmdbClient {
         let end = format_discover_date(movie_window.end);
 
         let mut regional_candidates = HashMap::new();
+        let mut movie_regions: HashMap<u64, BTreeSet<String>> = HashMap::new();
         let mut movies = Vec::new();
 
         for region in &self.priority_regions {
@@ -155,6 +157,12 @@ impl TmdbClient {
                 )
                 .await?;
             regional_candidates.insert(region.clone(), region_movies.len());
+            for region_movie in &region_movies {
+                movie_regions
+                    .entry(region_movie.id)
+                    .or_default()
+                    .insert(region.clone());
+            }
 
             movies.extend(region_movies.into_iter().take(MAX_MOVIES_PER_REGION));
         }
@@ -181,6 +189,8 @@ impl TmdbClient {
 
         let raw_movies = movies.len();
         let mut releases = Vec::new();
+        let mut details_enriched = 0usize;
+        let mut logged_candidates = 0usize;
         let mut skipped_missing_date = 0usize;
         let mut skipped_missing_original_date = 0usize;
         let mut skipped_missing_digital_date = 0usize;
@@ -192,16 +202,72 @@ impl TmdbClient {
         let mut skipped_by_genre = 0usize;
         let mut skipped_by_quality = 0usize;
         let mut skipped_by_runtime = 0usize;
+        let mut skipped_by_other = 0usize;
         let current_year = window.end.date_naive().year();
         for movie in movies.into_iter() {
+            let discover_regions = movie_regions
+                .get(&movie.id)
+                .map(|regions| regions.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let release_date_value = if movie.release_date.trim().is_empty() {
+                "<missing>".to_string()
+            } else {
+                movie.release_date.clone()
+            };
             if movie.release_date.is_empty() {
                 skipped_missing_date += 1;
+                skipped_by_other += 1;
+                if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
+                    info!(
+                        target: "tmdb",
+                        title = %movie.title,
+                        movie_id = movie.id,
+                        release_date = %release_date_value,
+                        discover_regions = ?discover_regions,
+                        production_countries = ?Vec::<String>::new(),
+                        genres = ?Vec::<String>::new(),
+                        vote_average = "missing",
+                        vote_count = "missing",
+                        runtime = "missing",
+                        imdb_id = "missing",
+                        verdict = %MovieFilterVerdict::rejected(
+                            MovieRejectionReason::Other,
+                            "missing_release_date"
+                        ).kind(),
+                        reason = "missing_release_date",
+                        "movie_candidate_diagnostic"
+                    );
+                    logged_candidates += 1;
+                }
                 continue;
             }
             let Some(original_release_date) =
                 parse_original_release_date(&movie.original_release_date)
             else {
                 skipped_missing_original_date += 1;
+                skipped_by_other += 1;
+                if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
+                    info!(
+                        target: "tmdb",
+                        title = %movie.title,
+                        movie_id = movie.id,
+                        release_date = %release_date_value,
+                        discover_regions = ?discover_regions,
+                        production_countries = ?Vec::<String>::new(),
+                        genres = ?Vec::<String>::new(),
+                        vote_average = "missing",
+                        vote_count = "missing",
+                        runtime = "missing",
+                        imdb_id = "missing",
+                        verdict = %MovieFilterVerdict::rejected(
+                            MovieRejectionReason::Other,
+                            "missing_original_release_date"
+                        ).kind(),
+                        reason = "missing_original_release_date",
+                        "movie_candidate_diagnostic"
+                    );
+                    logged_candidates += 1;
+                }
                 continue;
             };
             let original_year = original_release_date.year();
@@ -220,38 +286,77 @@ impl TmdbClient {
                 .ok()
                 .unwrap_or(original_release_date);
             let details = self.fetch_movie_details(movie.id).await?;
+            details_enriched += 1;
             let today = window.end.date_naive();
             let Some(digital_release_date) =
                 self.fetch_digital_release_date(movie.id, today).await?
             else {
                 skipped_missing_digital_date += 1;
+                skipped_by_other += 1;
+                if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
+                    log_movie_candidate_diagnostic(
+                        &movie,
+                        &discover_regions,
+                        &release_date_value,
+                        &details,
+                        MovieFilterVerdict::rejected(
+                            MovieRejectionReason::Other,
+                            "missing_digital_release_date",
+                        ),
+                    );
+                    logged_candidates += 1;
+                }
                 continue;
             };
 
             if !date_in_window(digital_release_date, window) {
                 skipped_outside_window += 1;
+                skipped_by_other += 1;
+                if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
+                    log_movie_candidate_diagnostic(
+                        &movie,
+                        &discover_regions,
+                        &release_date_value,
+                        &details,
+                        MovieFilterVerdict::rejected(
+                            MovieRejectionReason::Other,
+                            "digital_release_outside_window",
+                        ),
+                    );
+                    logged_candidates += 1;
+                }
                 continue;
             }
 
             after_basic_filter += 1;
             let verdict = movie_filter_verdict(&details);
-            if !verdict.has_imdb_id {
+            if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
+                log_movie_candidate_diagnostic(
+                    &movie,
+                    &discover_regions,
+                    &release_date_value,
+                    &details,
+                    verdict,
+                );
+                logged_candidates += 1;
+            }
+            if verdict.rejection_reason == Some(MovieRejectionReason::ImdbMissing) {
                 skipped_by_imdb += 1;
                 continue;
             }
-            if !verdict.has_relevant_country {
+            if verdict.rejection_reason == Some(MovieRejectionReason::Country) {
                 skipped_by_country += 1;
                 continue;
             }
-            if verdict.has_excluded_genre {
+            if verdict.rejection_reason == Some(MovieRejectionReason::Genre) {
                 skipped_by_genre += 1;
                 continue;
             }
-            if !verdict.passes_quality_filters {
+            if verdict.rejection_reason == Some(MovieRejectionReason::RatingVoteCount) {
                 skipped_by_quality += 1;
                 continue;
             }
-            if !verdict.passes_runtime_filter {
+            if verdict.rejection_reason == Some(MovieRejectionReason::Runtime) {
                 skipped_by_runtime += 1;
                 continue;
             }
@@ -291,6 +396,23 @@ impl TmdbClient {
             skipped_by_imdb,
             final_movies = releases.len(),
             "Диагностика фильтрации фильмов"
+        );
+        info!(
+            target: "tmdb",
+            raw_movies,
+            details_enriched,
+            accepted_movies = releases.len(),
+            rejected_country = skipped_by_country,
+            rejected_genre = skipped_by_genre,
+            rejected_rating_vote_count = skipped_by_quality,
+            rejected_runtime = skipped_by_runtime,
+            rejected_imdb_missing = skipped_by_imdb,
+            rejected_other = skipped_by_other,
+            detailed_logged = logged_candidates,
+            debug_limit = MOVIE_DEBUG_CANDIDATES_LIMIT,
+            discover_start = %start,
+            discover_end = %end,
+            "Сводка movie-пайплайна"
         );
 
         Ok(releases)
@@ -1022,22 +1144,63 @@ fn passes_quality_filters(
 }
 
 pub fn is_relevant_release(details: &MovieDetails) -> bool {
-    let verdict = movie_filter_verdict(details);
-
-    verdict.has_imdb_id
-        && verdict.has_relevant_country
-        && !verdict.has_excluded_genre
-        && verdict.passes_runtime_filter
-        && verdict.passes_quality_filters
+    movie_filter_verdict(details).is_accepted()
 }
 
 #[derive(Debug, Clone, Copy)]
 struct MovieFilterVerdict {
-    has_imdb_id: bool,
-    has_relevant_country: bool,
-    has_excluded_genre: bool,
-    passes_runtime_filter: bool,
-    passes_quality_filters: bool,
+    rejection_reason: Option<MovieRejectionReason>,
+    note: &'static str,
+}
+
+impl MovieFilterVerdict {
+    fn accepted() -> Self {
+        Self {
+            rejection_reason: None,
+            note: "passed_all_filters",
+        }
+    }
+
+    fn rejected(reason: MovieRejectionReason, note: &'static str) -> Self {
+        Self {
+            rejection_reason: Some(reason),
+            note,
+        }
+    }
+
+    fn is_accepted(self) -> bool {
+        self.rejection_reason.is_none()
+    }
+
+    fn kind(self) -> &'static str {
+        match self.rejection_reason {
+            None => "accepted",
+            Some(reason) => reason.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MovieRejectionReason {
+    Country,
+    Genre,
+    RatingVoteCount,
+    Runtime,
+    ImdbMissing,
+    Other,
+}
+
+impl MovieRejectionReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Country => "rejected: country",
+            Self::Genre => "rejected: genre",
+            Self::RatingVoteCount => "rejected: rating_vote_count",
+            Self::Runtime => "rejected: runtime",
+            Self::ImdbMissing => "rejected: imdb_missing",
+            Self::Other => "rejected: other",
+        }
+    }
 }
 
 fn movie_filter_verdict(details: &MovieDetails) -> MovieFilterVerdict {
@@ -1058,13 +1221,79 @@ fn movie_filter_verdict(details: &MovieDetails) -> MovieFilterVerdict {
     let passes_quality_filters =
         passes_quality_filters(details.vote_average, details.vote_count, details.popularity);
 
-    MovieFilterVerdict {
-        has_imdb_id,
-        has_relevant_country,
-        has_excluded_genre,
-        passes_runtime_filter,
-        passes_quality_filters,
+    if !has_imdb_id {
+        return MovieFilterVerdict::rejected(MovieRejectionReason::ImdbMissing, "imdb_id_missing");
     }
+    if !has_relevant_country {
+        return MovieFilterVerdict::rejected(
+            MovieRejectionReason::Country,
+            "no_relevant_production_country",
+        );
+    }
+    if has_excluded_genre {
+        return MovieFilterVerdict::rejected(
+            MovieRejectionReason::Genre,
+            "contains_excluded_genre",
+        );
+    }
+    if !passes_quality_filters {
+        return MovieFilterVerdict::rejected(
+            MovieRejectionReason::RatingVoteCount,
+            "quality_filters_failed",
+        );
+    }
+    if !passes_runtime_filter {
+        return MovieFilterVerdict::rejected(
+            MovieRejectionReason::Runtime,
+            "runtime_less_than_minimum",
+        );
+    }
+
+    MovieFilterVerdict::accepted()
+}
+
+fn log_movie_candidate_diagnostic(
+    movie: &DiscoverMovie,
+    discover_regions: &[String],
+    release_date: &str,
+    details: &MovieDetails,
+    verdict: MovieFilterVerdict,
+) {
+    let production_countries = details
+        .production_countries
+        .iter()
+        .map(|country| country.code.clone())
+        .collect::<Vec<_>>();
+    let genres = details
+        .genres
+        .iter()
+        .map(|genre| genre.name.clone())
+        .collect::<Vec<_>>();
+
+    info!(
+        target: "tmdb",
+        title = %movie.title,
+        movie_id = movie.id,
+        release_date = %release_date,
+        discover_regions = ?discover_regions,
+        production_countries = ?production_countries,
+        genres = ?genres,
+        vote_average = ?details.vote_average,
+        vote_count = ?details.vote_count,
+        runtime = ?details.runtime,
+        imdb_id = %if details
+            .imdb_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            "present"
+        } else {
+            "missing"
+        },
+        verdict = %verdict.kind(),
+        reason = %verdict.note,
+        "movie_candidate_diagnostic"
+    );
 }
 
 #[cfg(test)]
@@ -1133,6 +1362,11 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert_eq!(
+            verdict.rejection_reason,
+            Some(MovieRejectionReason::Country)
+        );
     }
 
     #[test]
@@ -1142,6 +1376,11 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert_eq!(
+            verdict.rejection_reason,
+            Some(MovieRejectionReason::ImdbMissing)
+        );
     }
 
     #[test]
@@ -1151,6 +1390,11 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert_eq!(
+            verdict.rejection_reason,
+            Some(MovieRejectionReason::RatingVoteCount)
+        );
     }
 
     #[test]
@@ -1240,6 +1484,8 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert_eq!(verdict.rejection_reason, Some(MovieRejectionReason::Genre));
     }
 
     #[test]
@@ -1249,6 +1495,11 @@ mod tests {
         });
 
         assert!(!is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert_eq!(
+            verdict.rejection_reason,
+            Some(MovieRejectionReason::Runtime)
+        );
     }
 
     #[test]
@@ -1258,6 +1509,8 @@ mod tests {
         });
 
         assert!(is_relevant_release(&details));
+        let verdict = movie_filter_verdict(&details);
+        assert!(verdict.is_accepted());
     }
 
     #[test]
