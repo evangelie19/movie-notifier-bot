@@ -1099,7 +1099,9 @@ fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
 
 fn parse_optional_release_date(raw: &str) -> Option<NaiveDate> {
     let value = raw.trim();
-    (!value.is_empty()).then(|| parse_release_date(value).ok()).flatten()
+    (!value.is_empty())
+        .then(|| parse_release_date(value).ok())
+        .flatten()
 }
 
 fn parse_original_release_date(raw: &str) -> Option<NaiveDate> {
