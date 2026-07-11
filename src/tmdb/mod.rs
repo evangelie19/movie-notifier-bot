@@ -440,8 +440,11 @@ impl TmdbClient {
             let details = self.fetch_tv_details(show_id).await?;
             let mut has_premiere = false;
 
-            if let Some(first_air_date) = details.first_air_date.as_deref() {
-                let date = parse_release_date(first_air_date)?;
+            if let Some(date) = details
+                .first_air_date
+                .as_deref()
+                .and_then(parse_optional_release_date)
+            {
                 if date_in_window(date, window) {
                     if passes_quality_filters(
                         details.vote_average,
@@ -470,11 +473,14 @@ impl TmdbClient {
             }
 
             for season in details.seasons.iter() {
-                let Some(air_date) = season.air_date.as_deref() else {
+                let Some(date) = season
+                    .air_date
+                    .as_deref()
+                    .and_then(parse_optional_release_date)
+                else {
                     skipped_missing_date += 1;
                     continue;
                 };
-                let date = parse_release_date(air_date)?;
                 if !date_in_window(date, window) {
                     skipped_outside_window += 1;
                     continue;
@@ -1008,10 +1014,10 @@ fn select_digital_release_date(
             if entry.release_type != 4 {
                 continue;
             }
-            if entry.release_date.is_empty() {
+            let Some(date) = parse_optional_release_date(&entry.release_date) else {
                 continue;
-            }
-            dates.push(parse_release_date(&entry.release_date)?);
+            };
+            dates.push(date);
         }
 
         if !dates.is_empty() {
@@ -1089,6 +1095,11 @@ fn parse_release_date(raw: &str) -> Result<NaiveDate, TmdbError> {
     }
 
     Ok(NaiveDate::parse_from_str(raw, "%Y-%m-%d")?)
+}
+
+fn parse_optional_release_date(raw: &str) -> Option<NaiveDate> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| parse_release_date(value).ok()).flatten()
 }
 
 fn parse_original_release_date(raw: &str) -> Option<NaiveDate> {
@@ -1743,6 +1754,17 @@ mod tests {
         assert_eq!(
             limit_total_pages(MAX_DISCOVER_PAGES + 4),
             MAX_DISCOVER_PAGES
+        );
+    }
+
+    #[test]
+    fn optional_release_date_skips_empty_and_invalid_values() {
+        assert_eq!(parse_optional_release_date(""), None);
+        assert_eq!(parse_optional_release_date("   "), None);
+        assert_eq!(parse_optional_release_date("not-a-date"), None);
+        assert_eq!(
+            parse_optional_release_date("2026-07-11"),
+            NaiveDate::from_ymd_opt(2026, 7, 11)
         );
     }
 
