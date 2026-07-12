@@ -2,8 +2,6 @@ name: Daily Sync
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 9 * * *'
 
 jobs:
   fetch_digital_releases:
