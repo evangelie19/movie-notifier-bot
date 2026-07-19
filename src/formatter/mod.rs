@@ -29,6 +29,7 @@ pub struct DigitalRelease {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatRelease {
+    pub id: u64,
     pub title: String,
     pub event_date: NaiveDate,
     pub kind: ReleaseKind,
@@ -108,6 +109,7 @@ pub fn group_releases_by_chat(
             .iter()
             .filter(|release| chat.matches_locale(&release.locale))
             .map(|release| ChatRelease {
+                id: release.id,
                 title: release.title.clone(),
                 event_date: release.event_date,
                 kind: release.kind.clone(),
@@ -145,16 +147,25 @@ pub fn build_messages(
                     ReleaseKind::Movie => {
                         let title = release.title;
                         let date = release.event_date.format("%Y-%m-%d").to_string();
-                        format!("🔥 {title} — {date}")
+                        format!(
+                            "🔥 {title} — {date}\nhttps://www.themoviedb.org/movie/{}",
+                            release.id
+                        )
                     }
                     ReleaseKind::TvPremiere => {
                         let title = release.title;
                         let year = release.event_date.year();
-                        format!("📺 Премьера сериала: {title} ({year})")
+                        format!(
+                            "📺 Премьера сериала: {title} ({year})\nhttps://www.themoviedb.org/tv/{}",
+                            release.id
+                        )
                     }
                     ReleaseKind::TvSeason { season_number } => {
                         let title = release.title;
-                        format!("📺 Новый сезон: {title} — сезон {season_number}")
+                        format!(
+                            "📺 Новый сезон: {title} — сезон {season_number}\nhttps://www.themoviedb.org/tv/{}",
+                            release.id
+                        )
                     }
                 };
                 lines.push(line);
@@ -255,6 +266,7 @@ mod tests {
         assert!(lines[0].starts_with("🔥"));
         assert!(lines[1].starts_with("🔥"));
         assert!(lines[0].contains("Свежий релиз"));
+        assert!(text.contains("https://www.themoviedb.org/movie/2"));
     }
 
     #[test]
@@ -279,6 +291,7 @@ mod tests {
                 .text
                 .contains("📺 Новый сезон: Сериал — сезон 2")
         );
+        assert!(messages[0].text.contains("https://www.themoviedb.org/tv/10"));
     }
 
     #[test]
