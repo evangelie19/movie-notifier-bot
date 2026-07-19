@@ -41,6 +41,8 @@ enum AppError {
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
+    init_tracing();
+
     let config = AppConfig::from_env()?;
     let mut orchestrator = config.build_orchestrator()?;
 
@@ -50,6 +52,15 @@ async fn main() -> Result<(), AppError> {
     println!("{}", summary.render_markdown());
 
     Ok(())
+}
+
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
 }
 
 fn required_env(name: &str) -> Result<String, AppError> {
