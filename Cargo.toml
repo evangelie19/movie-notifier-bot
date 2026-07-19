@@ -11,7 +11,6 @@ serde_json = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 urlencoding = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 async-trait = "0.1"
