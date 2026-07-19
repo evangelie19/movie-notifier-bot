@@ -415,6 +415,11 @@ impl TmdbClient {
             "Сводка movie-пайплайна"
         );
 
+        println!(
+            "movie_filter_summary raw={raw_movies} accepted={} missing_release_date={skipped_missing_date} missing_original_date={skipped_missing_original_date} missing_digital_date={skipped_missing_digital_date} outside_window={skipped_outside_window} old={skipped_old} no_imdb={skipped_by_imdb} country={skipped_by_country} genre={skipped_by_genre} quality={skipped_by_quality} runtime={skipped_by_runtime}",
+            releases.len()
+        );
+
         Ok(releases)
     }
 
