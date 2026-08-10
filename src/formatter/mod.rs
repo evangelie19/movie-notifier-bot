@@ -291,7 +291,11 @@ mod tests {
                 .text
                 .contains("📺 Новый сезон: Сериал — сезон 2")
         );
-        assert!(messages[0].text.contains("https://www.themoviedb.org/tv/10"));
+        assert!(
+            messages[0]
+                .text
+                .contains("https://www.themoviedb.org/tv/10")
+        );
     }
 
     #[test]
