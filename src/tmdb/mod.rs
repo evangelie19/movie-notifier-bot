@@ -241,30 +241,23 @@ impl TmdbClient {
                 }
                 continue;
             }
-            let Some(original_release_date) =
-                parse_original_release_date(&movie.original_release_date)
+
+            let details = self.fetch_movie_details(movie.id).await?;
+            details_enriched += 1;
+            let Some(original_release_date) = parse_original_release_date(&details.release_date)
             else {
                 skipped_missing_original_date += 1;
                 skipped_by_other += 1;
                 if logged_candidates < MOVIE_DEBUG_CANDIDATES_LIMIT {
-                    info!(
-                        target: "tmdb",
-                        title = %movie.title,
-                        movie_id = movie.id,
-                        release_date = %release_date_value,
-                        discover_regions = ?discover_regions,
-                        production_countries = ?Vec::<String>::new(),
-                        genres = ?Vec::<String>::new(),
-                        vote_average = "missing",
-                        vote_count = "missing",
-                        runtime = "missing",
-                        imdb_id = "missing",
-                        verdict = %MovieFilterVerdict::rejected(
+                    log_movie_candidate_diagnostic(
+                        &movie,
+                        &discover_regions,
+                        &release_date_value,
+                        &details,
+                        MovieFilterVerdict::rejected(
                             MovieRejectionReason::Other,
-                            "missing_original_release_date"
-                        ).kind(),
-                        reason = "missing_original_release_date",
-                        "movie_candidate_diagnostic"
+                            "missing_original_release_date",
+                        ),
                     );
                     logged_candidates += 1;
                 }
@@ -282,11 +275,7 @@ impl TmdbClient {
                 );
                 continue;
             }
-            let release_date = parse_release_date(&movie.release_date)
-                .ok()
-                .unwrap_or(original_release_date);
-            let details = self.fetch_movie_details(movie.id).await?;
-            details_enriched += 1;
+            let release_date = original_release_date;
             let today = window.end.date_naive();
             let Some(digital_release_date) =
                 self.fetch_digital_release_date(movie.id, today).await?
@@ -545,6 +534,7 @@ impl TmdbClient {
         Ok(MovieDetails {
             homepage: payload.homepage,
             imdb_id: payload.imdb_id,
+            release_date: payload.release_date,
             watch_providers,
             production_countries: payload.production_countries,
             vote_average: payload.vote_average,
@@ -770,12 +760,6 @@ enum TvDiscoverFilter {
 struct DiscoverMovie {
     id: u64,
     title: String,
-    #[serde(
-        default,
-        rename = "primary_release_date",
-        alias = "original_release_date"
-    )]
-    original_release_date: String,
     #[serde(default)]
     release_date: String,
     #[serde(default)]
@@ -800,6 +784,8 @@ struct DiscoverTvShow {
 struct MovieDetailsResponse {
     homepage: Option<String>,
     imdb_id: Option<String>,
+    #[serde(default)]
+    release_date: String,
     #[serde(rename = "watch/providers")]
     watch_providers: Option<WatchProvidersEnvelope>,
     #[serde(default)]
@@ -872,6 +858,7 @@ struct ReleaseDateEntry {
 pub struct MovieDetails {
     homepage: Option<String>,
     imdb_id: Option<String>,
+    release_date: String,
     watch_providers: Vec<String>,
     production_countries: Vec<ProductionCountry>,
     vote_average: Option<f64>,
@@ -1326,6 +1313,7 @@ mod tests {
         let mut details = MovieDetails {
             homepage: None,
             imdb_id: Some("tt1234567".to_string()),
+            release_date: "2026-01-15".to_string(),
             watch_providers: Vec::new(),
             production_countries: vec![ProductionCountry {
                 code: "US".to_string(),
@@ -1362,6 +1350,34 @@ mod tests {
             .iter()
             .map(|region| (*region).to_string())
             .collect()
+    }
+
+    #[test]
+    fn discover_movie_deserializes_tmdb_release_date_without_primary_release_date() {
+        let payload = r#"{
+            "id": 123,
+            "title": "Test Movie",
+            "release_date": "2026-08-08",
+            "original_language": "en",
+            "popularity": 42.0
+        }"#;
+
+        let movie: DiscoverMovie = serde_json::from_str(payload).expect("discover movie parses");
+
+        assert_eq!(movie.id, 123);
+        assert_eq!(movie.release_date, "2026-08-08");
+    }
+
+    #[test]
+    fn movie_details_deserializes_canonical_release_date() {
+        let payload = r#"{
+            "release_date": "2026-07-31"
+        }"#;
+
+        let details: MovieDetailsResponse =
+            serde_json::from_str(payload).expect("movie details parse");
+
+        assert_eq!(details.release_date, "2026-07-31");
     }
 
     #[test]
