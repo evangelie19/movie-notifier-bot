@@ -28,3 +28,8 @@ target
 # Дополнительные зависимости, сложенные в vendor, могут содержать локи —
 # исключаем их из статуса git как вспомогательные файлы сборки.
 vendor/**/Cargo.lock
+
+# Local environment files may contain API keys and bot tokens.
+.env
+.env.*
+!.env.example
